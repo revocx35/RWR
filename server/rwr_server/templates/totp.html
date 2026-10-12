@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Two-factor code · RWR server{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Two-factor code</h1>
+  <p>Enter the 6-digit code from your authenticator app.</p>
+  <form method="post" action="/login/totp">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Code <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required autofocus></label>
+    <button>Verify</button>
+  </form>
+</section>
+{% endblock %}

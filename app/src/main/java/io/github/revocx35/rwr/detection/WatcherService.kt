@@ -14,10 +14,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.Paint
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.service.quicksettings.TileService
@@ -39,23 +39,35 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import io.github.revocx35.rwr.BuildConfig
+import io.github.revocx35.rwr.MediaType
 import io.github.revocx35.rwr.Prefs
 import io.github.revocx35.rwr.R
 import io.github.revocx35.rwr.RwrApp
 import io.github.revocx35.rwr.alert.AlertPresenter
 import io.github.revocx35.rwr.alert.SnapshotStore
+import io.github.revocx35.rwr.media.ClipEncoder
+import io.github.revocx35.rwr.media.EncodedFrame
+import io.github.revocx35.rwr.media.FrameCodec
+import io.github.revocx35.rwr.media.FrameRing
+import io.github.revocx35.rwr.server.ServerAccount
+import io.github.revocx35.rwr.server.ServerApi
+import io.github.revocx35.rwr.server.StreamClient
 import io.github.revocx35.rwr.tile.WatchTileService
 import io.github.revocx35.rwr.ui.MainActivity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
- * Foreground service (type camera) that streams low-rate frames from the front camera, finds faces
- * looking at the screen, and raises alerts with a snapshot. Camera is released while the screen is off.
+ * Foreground service (type camera) that reads low-rate frames from the front camera, finds faces
+ * looking at the screen, and raises alerts with a snapshot or clip. Camera is released while the screen is off.
+ *
+ * Detection runs either here (ML Kit for faces/head pose, plus MediaPipe iris tracking in eye mode) or on the
+ * paired RWR server, which gets every frame over a pinned wss:// stream and sends back alerts.
  *
  * Must be started while the app is in the foreground (activity or the tile's trampoline activity):
  * Android 14+ refuses to start a camera foreground service from the background.
@@ -65,11 +77,36 @@ class WatcherService : LifecycleService() {
     private lateinit var presenter: AlertPresenter
     private val gate = AlertGate()
     private var finder: FaceFinder? = null
+    private var eyeTracker: EyeTracker? = null
+    private var eyeTrackerFailed = false
     private var cameraProvider: ProcessCameraProvider? = null
     private var lastAnalyzedAt = 0L
 
-    /** All frame analysis (camera and debug injection) runs on this one thread, in order. */
+    /** All frame analysis (camera, server alerts, debug injection) runs on this one thread, in order. */
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    /** Clip encoding, gallery writes of clips and uploads: slow, so kept off the analysis thread. */
+    private val mediaExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    // --- analysis-thread state ---
+    private val ring = FrameRing(RING_MIN_SECONDS)
+    private var nextSeq = 1
+    private var clip: ClipJob? = null
+    /** Onlookers per frame seq, so clips can show boxes on the frames where they were detected. */
+    private val boxesBySeq = LinkedHashMap<Int, List<FaceBox>>()
+
+    // --- server ---
+    @Volatile private var account: ServerAccount? = null
+    @Volatile private var stream: StreamClient? = null
+
+    private class ClipJob(
+        val alertTs: Long,
+        val endTs: Long,
+        val frames: MutableList<EncodedFrame>,
+        val onlookers: Int,
+        val toGallery: Boolean,
+        val toUpload: Boolean,
+        val mode: String,
+    )
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -85,6 +122,8 @@ class WatcherService : LifecycleService() {
         prefs = Prefs(this)
         presenter = AlertPresenter(this)
         finder = FaceFinder()
+        account = ServerAccount.load(this)
+        updateRingLength()
         prefs.register(prefListener)
         ContextCompat.registerReceiver(
             this, screenReceiver,
@@ -98,6 +137,15 @@ class WatcherService : LifecycleService() {
         when (intent?.action) {
             ACTION_STOP -> {
                 stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_RELOAD_SERVER -> {
+                if (_running.value) {
+                    account = ServerAccount.load(this)
+                    stopStream()
+                    if (isInteractive()) startStreamIfNeeded()
+                    updateStatusNotification()
+                }
                 return START_NOT_STICKY
             }
             ACTION_DEBUG_INJECT -> {
@@ -123,7 +171,7 @@ class WatcherService : LifecycleService() {
             }
             _running.value = true
             refreshTile()
-            if (getSystemService(PowerManager::class.java).isInteractive) startCamera() else pauseCamera()
+            if (isInteractive()) startCamera() else pauseCamera()
         }
         // Not sticky: a system restart would happen from the background, where camera FGS is forbidden.
         return START_NOT_STICKY
@@ -134,12 +182,22 @@ class WatcherService : LifecycleService() {
         prefs.unregister(prefListener)
         unregisterReceiver(screenReceiver)
         cameraProvider?.unbindAll()
+        stopStream()
         presenter.dismissOverlay()
-        analysisExecutor.execute { finder?.close(); finder = null }
+        analysisExecutor.execute {
+            clip?.let(::finishClip)
+            finder?.close(); finder = null
+            eyeTracker?.close(); eyeTracker = null
+        }
         analysisExecutor.shutdown()
+        mediaExecutor.shutdown()  // lets a running clip finish
         refreshTile()
         super.onDestroy()
     }
+
+    private fun isInteractive() = getSystemService(PowerManager::class.java).isInteractive
+
+    // ------------------------------------------------------------------ camera
 
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
@@ -155,9 +213,10 @@ class WatcherService : LifecycleService() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
                 gate.reset()
-                updateStatusNotification(paused = false)
                 Log.i(TAG, "camera bound: ${analysis.resolutionInfo?.resolution}, fps=$appliedFpsRange, " +
                     if (prefs.efficientConversion) "YUV" else "RGBA")
+                startStreamIfNeeded()
+                updateStatusNotification(paused = false)
             } catch (e: Exception) {
                 Log.e(TAG, "cannot bind front camera", e)
                 stopSelf()
@@ -197,71 +256,313 @@ class WatcherService : LifecycleService() {
         return builder.build()
     }
 
-    /** Battery settings changed in the UI: rebind so they apply right away. */
+    /** Settings changed in the UI: apply them right away. */
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key in Prefs.CAMERA_KEYS && _running.value &&
-            getSystemService(PowerManager::class.java).isInteractive
-        ) startCamera()
+        if (!_running.value) return@OnSharedPreferenceChangeListener
+        when (key) {
+            in Prefs.CAMERA_KEYS -> if (isInteractive()) startCamera()
+            Prefs.KEY_SERVER -> {
+                stopStream()
+                if (isInteractive()) startStreamIfNeeded()
+                updateStatusNotification()
+            }
+            in Prefs.STREAM_KEYS -> {
+                updateRingLength()
+                stream?.updateSettings(streamSettings())
+            }
+        }
     }
 
     private fun pauseCamera() {
         cameraProvider?.unbindAll()
+        stopStream()
+        analysisExecutor.execute { clip?.let(::finishClip); ring.clear() }
         updateStatusNotification(paused = true)
         Log.i(TAG, "camera paused (screen off)")
     }
 
+    private fun updateRingLength() {
+        val seconds = maxOf(RING_MIN_SECONDS, if (prefs.mediaType == MediaType.VIDEO) prefs.preSec + 1 else 0)
+        analysisExecutor.execute { ring.seconds = seconds }
+    }
+
+    // ------------------------------------------------------------------ frames
+
     /** Runs on [analysisExecutor]. */
     private fun analyze(image: ImageProxy) {
-        val now = System.currentTimeMillis()
-        if (now - lastAnalyzedAt < FRAME_INTERVAL_MS) {
-            image.close()
-            return
+        image.use {
+            val now = System.currentTimeMillis()
+            val s = stream
+            val streaming = s?.isConnected == true
+            val buffering = streaming || prefs.mediaType == MediaType.VIDEO
+            // Frames are JPEG-encoded only when something needs them: the server, or a clip's rolling buffer.
+            if (buffering) {
+                val rotation = image.imageInfo.rotationDegrees
+                val frame = EncodedFrame(nextSeq++, now, FrameCodec.toJpeg(image), rotation)
+                ring.add(frame)
+                clip?.let { job ->
+                    job.frames += frame
+                    if (now >= job.endTs) finishClip(job)
+                }
+                if (streaming) s!!.sendFrame(frame.seq, now, rotation / 90, frame.jpeg)
+            }
+            if (!detectLocally(streaming) || now - lastAnalyzedAt < FRAME_INTERVAL_MS) return
+            lastAnalyzedAt = now
+            val upright = toUprightMirrored(image)
+            if (BuildConfig.DEBUG) dumpFrameIfRequested(upright)
+            process(upright, now, if (buffering) nextSeq - 1 else null)
         }
-        lastAnalyzedAt = now
-        val upright = image.use { toUprightMirrored(it) }
-        if (BuildConfig.DEBUG) dumpFrameIfRequested(upright)
-        process(upright, now)
+    }
+
+    /** On the phone unless server mode is on and the server is reachable (or fallback is off). */
+    private fun detectLocally(streaming: Boolean): Boolean {
+        if (!prefs.processOnServer || account == null) return true
+        return !streaming && prefs.fallbackLocal
     }
 
     /** Runs on [analysisExecutor]. */
-    private fun process(upright: Bitmap, now: Long) {
+    private fun process(upright: Bitmap, now: Long, seq: Int?) {
         val faces = runCatching { finder?.find(upright) }
             .onFailure { Log.w(TAG, "face detection failed", it) }
             .getOrNull() ?: return
-        val onlookers = OnlookerPolicy.onlookers(faces, prefs.ignoreOwner, prefs.maxHeadAngle)
+        val onlookers = when (prefs.detectionMode) {
+            DetectionMode.HEAD -> OnlookerPolicy.onlookers(faces, prefs.ignoreOwner, prefs.maxHeadAngle)
+            DetectionMode.EYE -> eyeOnlookers(upright, faces)
+        }
         if (BuildConfig.DEBUG && faces.isNotEmpty()) {
             Log.d(TAG, "frame ${upright.width}x${upright.height}: faces=$faces onlookers=${onlookers.size}")
         }
+        if (seq != null && onlookers.isNotEmpty()) rememberBoxes(seq, onlookers)
+        if (clip != null) return  // still recording the previous alert's clip
         if (!gate.onFrame(onlookers.isNotEmpty(), now, prefs.cooldownSec * 1000L)) return
-        Log.i(TAG, "onlooker alert: ${onlookers.size} of ${faces.size} faces")
+        Log.i(TAG, "onlooker alert: ${onlookers.size} of ${faces.size} faces (${prefs.detectionMode})")
+        raiseAlert(upright, onlookers, now, serverDetected = false)
+    }
+
+    /** Eye mode: iris gaze for each non-owner face that is turned roughly toward the camera. */
+    private fun eyeOnlookers(upright: Bitmap, faces: List<FaceBox>): List<FaceBox> {
+        val tracker = eyeTracker ?: if (eyeTrackerFailed) null else runCatching { EyeTracker(this) }
+            .onFailure { eyeTrackerFailed = true; Log.e(TAG, "eye tracker unavailable, using head pose", it) }
+            .getOrNull()?.also { eyeTracker = it }
+        val maxHead = prefs.maxHeadAngle
+        val maxGaze = prefs.maxGazeAngle
+        val limit = OnlookerPolicy.EYE_PREFILTER_ANGLE
+        return OnlookerPolicy.candidates(faces, prefs.ignoreOwner)
+            .filter { kotlin.math.abs(it.yaw) <= limit && kotlin.math.abs(it.pitch) <= limit }
+            .mapNotNull { face ->
+                val gaze = tracker?.let { t -> runCatching { t.gaze(upright, face) }.getOrNull() }
+                if (BuildConfig.DEBUG && gaze != null) {
+                    Log.d(TAG, "gaze %d,%d: head %.1f/%.1f eyes %.1f/%.1f -> %.1f/%.1f open=%b".format(
+                        face.left, face.top, gaze.headYaw, gaze.headPitch, gaze.eyeYaw, gaze.eyePitch,
+                        gaze.yaw, gaze.pitch, gaze.eyesOpen))
+                }
+                if (!OnlookerPolicy.isLookingEyeMode(face, gaze, maxHead, maxGaze)) return@mapNotNull null
+                if (gaze != null && face.width >= OnlookerPolicy.MIN_EYE_FACE_PX) {
+                    face.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
+                } else face
+            }
+    }
+
+    private fun rememberBoxes(seq: Int, onlookers: List<FaceBox>) {
+        boxesBySeq[seq] = onlookers
+        while (boxesBySeq.size > 300) boxesBySeq.remove(boxesBySeq.keys.first())
+    }
+
+    /**
+     * Shows the pop-up and saves to the chosen places. Runs on [analysisExecutor].
+     * [serverDetected]: the server found the onlooker and saves to Immich itself, so the phone never uploads.
+     */
+    private fun raiseAlert(upright: Bitmap, onlookers: List<FaceBox>, ts: Long, serverDetected: Boolean) {
         val snapshot = annotate(upright, onlookers)
-        val uri = SnapshotStore.save(this, snapshot, now)
-        ContextCompat.getMainExecutor(this).execute {
-            if (_running.value) presenter.show(snapshot, uri, onlookers.size, now)
+        val saveTo = prefs.saveTo
+        val acct = account
+        val upload = saveTo.immich && !serverDetected && acct != null
+        val note = when {
+            !saveTo.immich -> null
+            serverDetected -> getString(R.string.alert_immich_server)
+            acct == null -> "Immich needs a paired server"
+            else -> null
+        }
+        val mode = if (prefs.detectionMode == DetectionMode.EYE) "eye" else "head"
+        if (prefs.mediaType == MediaType.PHOTO) {
+            val uri = if (saveTo.gallery) SnapshotStore.save(this, snapshot, ts) else null
+            if (upload) mediaExecutor.execute { uploadPhoto(acct!!, snapshot, ts, onlookers.size, mode) }
+            onMain { presenter.show(snapshot, uri, onlookers.size, ts, clipPending = false, note = note) }
+            return
+        }
+        val recordHere = saveTo.gallery || upload
+        if (recordHere) {
+            val pre = ring.since(ts - prefs.preSec * 1000L).toMutableList()
+            val job = ClipJob(ts, ts + prefs.postSec * 1000L, pre, onlookers.size, saveTo.gallery, upload, mode)
+            clip = job
+            if (prefs.postSec == 0) finishClip(job)
+        }
+        onMain { presenter.show(snapshot, null, onlookers.size, ts, clipPending = recordHere, note = note) }
+    }
+
+    /** Runs on [analysisExecutor]: hands the collected frames to [mediaExecutor] for encoding. */
+    private fun finishClip(job: ClipJob) {
+        if (clip === job) clip = null
+        val frames = job.frames.sortedBy { it.tsMs }.distinctBy { it.seq }
+        val boxes = HashMap(boxesBySeq)
+        val acct = account
+        mediaExecutor.execute {
+            val dir = File(cacheDir, "clips").apply { mkdirs() }
+            val file = File(dir, "RWR_${job.alertTs}.mp4")
+            var lastBoxes: List<FaceBox> = emptyList()
+            var lastBoxTs = Long.MIN_VALUE / 2
+            val ok = ClipEncoder.encode(frames.map { it.tsMs }, { i ->
+                val f = frames[i]
+                boxes[f.seq]?.let { lastBoxes = it; lastBoxTs = f.tsMs }
+                FrameCodec.uprightMirrored(f)?.let { bmp ->
+                    // Keep boxes visible between analysed frames (~3 per second).
+                    if (lastBoxes.isNotEmpty() && f.tsMs - lastBoxTs < 700) annotate(bmp, lastBoxes) else bmp
+                }
+            }, file)
+            Log.i(TAG, "clip ${if (ok) "encoded" else "FAILED"}: ${frames.size} frames, ${file.length()} bytes")
+            var uri: Uri? = null
+            var note: String? = null
+            if (ok) {
+                if (job.toGallery) uri = SnapshotStore.saveVideo(this, file, job.alertTs)
+                if (job.toUpload && acct != null) {
+                    note = runCatching {
+                        ServerApi.uploadMedia(acct, file, video = true, takenAt = job.alertTs, onlookers = job.onlookers, mode = job.mode)
+                        getString(R.string.alert_sent_immich)
+                    }.getOrElse { Log.w(TAG, "clip upload failed", it); "Immich upload failed: ${it.message}" }
+                }
+            } else note = "clip could not be encoded"
+            file.delete()
+            onMain { presenter.clipReady(job.alertTs, uri, note) }
         }
     }
+
+    private fun uploadPhoto(acct: ServerAccount, snapshot: Bitmap, ts: Long, onlookers: Int, mode: String) {
+        val dir = File(cacheDir, "clips").apply { mkdirs() }
+        val file = File(dir, "RWR_$ts.jpg")
+        try {
+            file.outputStream().use { snapshot.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+            ServerApi.uploadMedia(acct, file, video = false, takenAt = ts, onlookers = onlookers, mode = mode)
+            Log.i(TAG, "photo sent to server for Immich")
+        } catch (e: Exception) {
+            Log.w(TAG, "photo upload failed", e)
+        } finally {
+            file.delete()
+        }
+    }
+
+    // ------------------------------------------------------------------ server stream
+
+    private fun streamSettings(): JSONObject = JSONObject()
+        .put("mode", if (prefs.detectionMode == DetectionMode.EYE) "eye" else "head")
+        .put("ignore_owner", prefs.ignoreOwner)
+        .put("max_head_angle", prefs.maxHeadAngle.toDouble())
+        .put("max_gaze_angle", prefs.maxGazeAngle.toDouble())
+        .put("cooldown_sec", prefs.cooldownSec)
+        .put("media", if (prefs.mediaType == MediaType.VIDEO) "video" else "photo")
+        .put("pre_sec", prefs.preSec)
+        .put("post_sec", prefs.postSec)
+        .put("save_immich", prefs.saveTo.immich)
+
+    private fun startStreamIfNeeded() {
+        val acct = account
+        if (!_running.value || !prefs.processOnServer || acct == null || stream != null) return
+        _serverState.value = ServerState.CONNECTING
+        stream = StreamClient(acct, streamListener).also { it.start(streamSettings()) }
+    }
+
+    private fun stopStream() {
+        stream?.stop()
+        stream = null
+        _serverState.value = ServerState.OFF
+    }
+
+    private val streamListener = object : StreamClient.Listener {
+        override fun onConnected() {
+            Log.i(TAG, "server stream connected")
+            _serverState.value = ServerState.CONNECTED
+            analysisExecutor.execute { gate.reset() }
+            onMain { updateStatusNotification() }
+        }
+
+        override fun onDisconnected(reason: String) {
+            _serverState.value = if (prefs.fallbackLocal) ServerState.FALLBACK else ServerState.CONNECTING
+            onMain { updateStatusNotification() }
+        }
+
+        override fun onRejected(reason: String) {
+            Log.w(TAG, "server rejected this device: $reason")
+            _serverState.value = ServerState.REJECTED
+            onMain { updateStatusNotification() }
+        }
+
+        override fun onAlert(alert: JSONObject) {
+            analysisExecutor.execute { handleServerAlert(alert) }
+        }
+    }
+
+    /** Runs on [analysisExecutor]. The server's boxes are in the same upright, mirrored frame space as ours. */
+    private fun handleServerAlert(alert: JSONObject) {
+        if (!_running.value || clip != null) return
+        val seq = alert.optInt("seq")
+        val frame = ring.bySeq(seq) ?: run { Log.w(TAG, "alert for frame $seq no longer buffered"); return }
+        val upright = FrameCodec.uprightMirrored(frame) ?: return
+        val faces = parseFaces(alert)
+        rememberBoxes(seq, faces)
+        Log.i(TAG, "server alert: ${faces.size} onlooker(s) in frame $seq")
+        raiseAlert(upright, faces, frame.tsMs, serverDetected = true)
+    }
+
+    private fun parseFaces(alert: JSONObject): List<FaceBox> {
+        val arr = alert.optJSONArray("faces") ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val f = arr.optJSONObject(i) ?: return@mapNotNull null
+            val b = f.optJSONArray("box") ?: return@mapNotNull null
+            if (b.length() != 4) return@mapNotNull null
+            val rays = f.optJSONArray("rays")?.let { r ->
+                (0 until r.length()).mapNotNull { j ->
+                    r.optJSONArray(j)?.takeIf { it.length() == 4 }?.let {
+                        Ray(it.getDouble(0).toFloat(), it.getDouble(1).toFloat(), it.getDouble(2).toFloat(), it.getDouble(3).toFloat())
+                    }
+                }
+            }.orEmpty()
+            FaceBox(b.getInt(0), b.getInt(1), b.getInt(2), b.getInt(3),
+                f.optDouble("yaw", 0.0).toFloat(), f.optDouble("pitch", 0.0).toFloat(), rays)
+        }
+    }
+
+    // ------------------------------------------------------------------ drawing & helpers
 
     /** Front-camera frames arrive sensor-oriented; rotate upright and mirror like a selfie preview. */
-    private fun toUprightMirrored(image: ImageProxy): Bitmap {
-        val raw = image.toBitmap()
-        val m = Matrix().apply {
-            postRotate(image.imageInfo.rotationDegrees.toFloat())
-            postScale(-1f, 1f)
-        }
-        return Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
-    }
+    private fun toUprightMirrored(image: ImageProxy): Bitmap =
+        FrameCodec.uprightMirrored(image.toBitmap(), image.imageInfo.rotationDegrees)
 
-    /** Draws a red box around each onlooker so the snapshot shows who triggered the alert. */
+    /** Red box around each onlooker; in eye mode also "laser" rays from the irises along the gaze. */
     private fun annotate(src: Bitmap, onlookers: List<FaceBox>): Bitmap {
         val out = src.copy(Bitmap.Config.ARGB_8888, true)
-        val paint = Paint().apply {
-            color = Color.RED
-            style = Paint.Style.STROKE
-            strokeWidth = maxOf(4f, out.width / 160f)
+        val stroke = maxOf(4f, out.width / 160f)
+        val box = Paint().apply { color = Color.RED; style = Paint.Style.STROKE; strokeWidth = stroke }
+        val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(110, 255, 0, 0); strokeWidth = stroke * 3; strokeCap = Paint.Cap.ROUND
         }
+        val beam = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(255, 70, 70); strokeWidth = stroke * 0.8f; strokeCap = Paint.Cap.ROUND
+        }
+        val core = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 225, 225) }
         val canvas = Canvas(out)
-        onlookers.forEach { canvas.drawRect(it.left.toFloat(), it.top.toFloat(), it.right.toFloat(), it.bottom.toFloat(), paint) }
+        onlookers.forEach { f ->
+            canvas.drawRect(f.left.toFloat(), f.top.toFloat(), f.right.toFloat(), f.bottom.toFloat(), box)
+            f.rays.forEach { r ->
+                canvas.drawLine(r.x0, r.y0, r.x1, r.y1, glow)
+                canvas.drawCircle(r.x0, r.y0, stroke * 2f, glow)
+                canvas.drawLine(r.x0, r.y0, r.x1, r.y1, beam)
+                canvas.drawCircle(r.x0, r.y0, stroke * 0.7f, core)
+            }
+        }
         return out
+    }
+
+    private fun onMain(block: () -> Unit) = ContextCompat.getMainExecutor(this).execute {
+        if (_running.value) block()
     }
 
     /** Debug builds only: feed an image from the app's files dir through the real pipeline (emulator tests). */
@@ -270,7 +571,7 @@ class WatcherService : LifecycleService() {
             val file = File(filesDir, relativePath)
             val bmp = BitmapFactory.decodeFile(file.path) ?: run { Log.w(TAG, "cannot decode $file"); return@execute }
             Log.i(TAG, "debug frame injected: ${bmp.width}x${bmp.height}")
-            process(bmp, System.currentTimeMillis())
+            process(bmp, System.currentTimeMillis(), null)
         }
     }
 
@@ -288,10 +589,19 @@ class WatcherService : LifecycleService() {
         val stop = PendingIntent.getService(
             this, 1, Intent(this, WatcherService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE,
         )
+        val state = _serverState.value
+        val text = when {
+            paused -> R.string.notif_paused_text
+            !prefs.processOnServer || account == null -> R.string.notif_watching_text
+            state == ServerState.CONNECTED -> R.string.notif_server_text
+            (state == ServerState.FALLBACK || state == ServerState.REJECTED) && prefs.fallbackLocal ->
+                R.string.notif_fallback_text
+            else -> R.string.notif_connecting_text
+        }
         return NotificationCompat.Builder(this, RwrApp.CHANNEL_WATCH)
             .setSmallIcon(R.drawable.ic_eye)
             .setContentTitle(getString(R.string.notif_watching_title))
-            .setContentText(getString(if (paused) R.string.notif_paused_text else R.string.notif_watching_text))
+            .setContentText(getString(text))
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(0, getString(R.string.action_stop), stop)
@@ -299,7 +609,7 @@ class WatcherService : LifecycleService() {
             .build()
     }
 
-    private fun updateStatusNotification(paused: Boolean) {
+    private fun updateStatusNotification(paused: Boolean = !isInteractive()) {
         if (!_running.value) return
         runCatching {
             getSystemService(android.app.NotificationManager::class.java)
@@ -310,17 +620,24 @@ class WatcherService : LifecycleService() {
     private fun refreshTile() =
         TileService.requestListeningState(this, ComponentName(this, WatchTileService::class.java))
 
+    enum class ServerState { OFF, CONNECTING, CONNECTED, FALLBACK, REJECTED }
+
     companion object {
         private const val TAG = "WatcherService"
         private const val NOTIFICATION_ID = 1
-        /** ~3 analysed frames per second: responsive enough, light on battery. */
+        /** ~3 analysed frames per second on the phone: responsive enough, light on battery. */
         private const val FRAME_INTERVAL_MS = 330L
+        /** Frames kept even in photo mode, so a server alert can find the frame it refers to. */
+        private const val RING_MIN_SECONDS = 4
         const val ACTION_STOP = "io.github.revocx35.rwr.STOP"
+        const val ACTION_RELOAD_SERVER = "io.github.revocx35.rwr.RELOAD_SERVER"
         const val ACTION_DEBUG_INJECT = "io.github.revocx35.rwr.DEBUG_INJECT"
         const val EXTRA_PATH = "path"
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running.asStateFlow()
+        private val _serverState = MutableStateFlow(ServerState.OFF)
+        val serverState: StateFlow<ServerState> = _serverState.asStateFlow()
 
         /** Call only while the app is in the foreground (see class doc). */
         fun start(context: Context) =
@@ -328,6 +645,13 @@ class WatcherService : LifecycleService() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, WatcherService::class.java))
+        }
+
+        /** The paired server changed (paired/unpaired): reconnect if running. */
+        fun reloadServer(context: Context) {
+            if (_running.value) {
+                context.startService(Intent(context, WatcherService::class.java).setAction(ACTION_RELOAD_SERVER))
+            }
         }
     }
 }

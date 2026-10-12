@@ -40,18 +40,56 @@ class AlertPresenter(private val context: Context) {
     private var overlay: View? = null
     private val autoDismiss = Runnable { dismissOverlay() }
     private var nextNotificationId = ALERT_NOTIFICATION_BASE
+    /** The alert currently waiting for its clip: (alert time, notification id, snapshot, subtitle). */
+    private var pending: PendingClip? = null
 
-    fun show(snapshot: Bitmap, savedUri: Uri?, onlookerCount: Int, at: Long) {
+    private class PendingClip(val at: Long, val notificationId: Int, val snapshot: Bitmap, val subtitle: String)
+
+    /**
+     * [savedUri]: the photo in the gallery, if saved. [clipPending]: a video clip is being recorded for this alert;
+     * call [clipReady] when it is saved. [note] is appended to the subtitle (e.g. "sent to Immich").
+     */
+    fun show(snapshot: Bitmap, savedUri: Uri?, onlookerCount: Int, at: Long, clipPending: Boolean = false, note: String? = null) {
         val subtitle = buildString {
             append(DateFormat.getTimeFormat(context).format(Date(at)))
             if (onlookerCount > 1) append(" · $onlookerCount people")
             if (savedUri != null) append(" · ").append(context.getString(R.string.alert_saved))
+            if (clipPending) append(" · ").append(context.getString(R.string.alert_recording))
+            if (note != null) append(" · ").append(note)
         }
-        postNotification(snapshot, savedUri, subtitle)
-        if (Prefs(context).overlayPopup && Settings.canDrawOverlays(context)) showOverlay(snapshot, savedUri, subtitle)
+        val id = nextNotificationId++
+        if (clipPending) pending = PendingClip(at, id, snapshot, subtitle)
+        postNotification(id, snapshot, savedUri, "image/jpeg", subtitle)
+        if (Prefs(context).overlayPopup && Settings.canDrawOverlays(context)) {
+            showOverlay(snapshot, savedUri, "image/jpeg", subtitle, clipPending)
+        }
     }
 
-    private fun postNotification(snapshot: Bitmap, savedUri: Uri?, subtitle: String) {
+    /** The clip for the alert at [at] finished (null uri = not saved to the gallery). */
+    fun clipReady(at: Long, uri: Uri?, note: String?) {
+        val p = pending?.takeIf { it.at == at } ?: return
+        pending = null
+        val subtitle = p.subtitle.replace(
+            context.getString(R.string.alert_recording),
+            if (uri != null) context.getString(R.string.alert_clip_saved) else note ?: context.getString(R.string.alert_clip_done),
+        )
+        postNotification(p.notificationId, p.snapshot, uri, "video/mp4", subtitle)
+        overlay?.let { view ->
+            view.findViewById<TextView>(R.id.alert_subtitle).text = subtitle
+            view.findViewById<Button>(R.id.alert_open).apply {
+                if (uri != null) {
+                    visibility = View.VISIBLE
+                    isEnabled = true
+                    text = context.getString(R.string.alert_open_clip)
+                    setOnClickListener { openMedia(uri, "video/mp4") }
+                } else {
+                    visibility = View.GONE
+                }
+            }
+        }
+    }
+
+    private fun postNotification(id: Int, snapshot: Bitmap, savedUri: Uri?, mime: String, subtitle: String) {
         // Keep the binder payload small: big pictures over a few MB get dropped by the system.
         val preview = snapshot.fitWithin(720)
         val builder = NotificationCompat.Builder(context, RwrApp.CHANNEL_ALERT)
@@ -68,32 +106,37 @@ class AlertPresenter(private val context: Context) {
         if (savedUri != null) {
             builder.setContentIntent(
                 PendingIntent.getActivity(
-                    context, nextNotificationId, viewImageIntent(savedUri),
+                    context, id, viewIntent(savedUri, mime),
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 )
             )
         }
         try {
-            nm.notify(nextNotificationId++, builder.build())
+            nm.notify(id, builder.build())
         } catch (e: SecurityException) {
             Log.w(TAG, "notification permission missing", e)
         }
     }
 
     @SuppressLint("InflateParams")
-    private fun showOverlay(snapshot: Bitmap, savedUri: Uri?, subtitle: String) {
+    private fun showOverlay(snapshot: Bitmap, savedUri: Uri?, mime: String, subtitle: String, clipPending: Boolean) {
         dismissOverlay()
         val view = LayoutInflater.from(context).inflate(R.layout.overlay_alert, null)
         view.findViewById<ImageView>(R.id.alert_snapshot).setImageBitmap(snapshot)
         view.findViewById<TextView>(R.id.alert_subtitle).text = subtitle
         view.findViewById<Button>(R.id.alert_dismiss).setOnClickListener { dismissOverlay() }
         view.findViewById<Button>(R.id.alert_open).apply {
-            visibility = if (savedUri != null) View.VISIBLE else View.GONE
-            setOnClickListener {
-                dismissOverlay()
-                // Holding SYSTEM_ALERT_WINDOW exempts us from background-activity-start limits.
-                runCatching { context.startActivity(viewImageIntent(savedUri!!)) }
-                    .onFailure { Log.w(TAG, "cannot open snapshot", it) }
+            when {
+                clipPending -> {
+                    visibility = View.VISIBLE
+                    isEnabled = false
+                    text = context.getString(R.string.alert_saving_clip)
+                }
+                savedUri != null -> {
+                    visibility = View.VISIBLE
+                    setOnClickListener { openMedia(savedUri, mime) }
+                }
+                else -> visibility = View.GONE
             }
         }
         val params = WindowManager.LayoutParams(
@@ -123,8 +166,15 @@ class AlertPresenter(private val context: Context) {
         overlay = null
     }
 
-    private fun viewImageIntent(uri: Uri) = Intent(Intent.ACTION_VIEW)
-        .setDataAndType(uri, "image/jpeg")
+    private fun openMedia(uri: Uri, mime: String) {
+        dismissOverlay()
+        // Holding SYSTEM_ALERT_WINDOW exempts us from background-activity-start limits.
+        runCatching { context.startActivity(viewIntent(uri, mime)) }
+            .onFailure { Log.w(TAG, "cannot open $mime", it) }
+    }
+
+    private fun viewIntent(uri: Uri, mime: String) = Intent(Intent.ACTION_VIEW)
+        .setDataAndType(uri, mime)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
     private fun Bitmap.fitWithin(maxSide: Int): Bitmap {
@@ -137,6 +187,6 @@ class AlertPresenter(private val context: Context) {
     private companion object {
         const val TAG = "AlertPresenter"
         const val ALERT_NOTIFICATION_BASE = 1000
-        const val OVERLAY_TIMEOUT_MS = 20_000L
+        const val OVERLAY_TIMEOUT_MS = 30_000L
     }
 }

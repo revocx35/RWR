@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No cleartext anywhere. Only the system CA store is trusted by default (no user-installed CAs);
+     the paired RWR server is trusted by its pinned key in PinnedTls.kt instead. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

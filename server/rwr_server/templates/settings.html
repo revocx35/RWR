@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+{% if test_result %}<p class="flash {{ 'ok' if test_ok else 'err' }}">Immich test: {{ test_result }}</p>{% endif %}
+<form method="post" action="/settings" class="card">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <h2>Immich</h2>
+  <p class="muted small">Phones that choose “Immich” or “Both” as the save location get their snapshots and clips uploaded here.
+  Create an API key in Immich (Account settings → API keys) with <code>asset.upload</code>, and for albums also
+  <code>album.read</code>, <code>album.create</code>, <code>albumAsset.create</code>.</p>
+  <label class="check"><input type="checkbox" name="immich_enabled" {{ "checked" if s.immich_enabled }}> Upload to Immich</label>
+  <label>Immich URL <input name="immich_url" value="{{ s.immich_url }}" placeholder="https://immich.example.lan" maxlength="300"></label>
+  <label>API key <input name="immich_api_key" type="password" autocomplete="off" maxlength="512"
+    placeholder="{{ 'saved – leave empty to keep it' if s.immich_api_key_set else 'paste the API key' }}"></label>
+  {% if s.immich_api_key_set %}<label class="check"><input type="checkbox" name="remove_api_key"> Remove the saved API key</label>{% endif %}
+  <label>Album (empty = no album) <input name="immich_album" value="{{ s.immich_album }}" maxlength="100"></label>
+  <label class="check"><input type="checkbox" name="immich_allow_http" {{ "checked" if s.immich_allow_http }}> Allow plain HTTP (insecure: only for an Immich on your own LAN)</label>
+  <label>Extra trusted CA certificate for a self-signed Immich (PEM, optional)
+    <textarea name="immich_ca_pem" rows="3" placeholder="-----BEGIN CERTIFICATE-----">{{ s.immich_ca_pem }}</textarea></label>
+
+  <h2>Event history</h2>
+  <label class="check"><input type="checkbox" name="keep_events" {{ "checked" if s.keep_events }}> Keep snapshots and clips on this server (viewable under Events)</label>
+  <label>Delete events after (days) <input name="retention_days" type="number" min="1" max="365" value="{{ s.retention_days }}"></label>
+
+  <h2>Detector</h2>
+  <label>Ignore faces narrower than (pixels) <input name="min_face_px" type="number" min="8" max="400" value="{{ s.min_face_px }}"></label>
+  <label>Face detector confidence (0.3–0.99; applies after restart) <input name="detector_score" type="number" min="0.3" max="0.99" step="0.01" value="{{ s.detector_score }}"></label>
+  <p class="muted small">Detection mode (head or eye tracking), angles, clip length and save location are chosen per phone in the app.</p>
+  <button>Save</button>
+</form>
+<form method="post" action="/settings/immich-test" class="card">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button class="secondary">Test Immich connection (saved settings)</button>
+</form>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card narrow center">
+  <h1>Set up two-factor authentication</h1>
+  <p>Scan with an authenticator app (Aegis, 2FAS, Google Authenticator, …), then enter the code it shows.</p>
+  <img class="qr" src="{{ qr }}" alt="TOTP QR code">
+  <p class="muted small">Or enter this key: <code class="wrap">{{ secret }}</code></p>
+  <form method="post" action="/account/totp/confirm">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Code <input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></label>
+    <button>Turn on</button>
+  </form>
+  <p class="muted small">Locked out later? <code>docker compose exec rwr python -m rwr_server.admin reset-password</code></p>
+</section>
+{% endblock %}

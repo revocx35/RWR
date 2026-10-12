@@ -52,12 +52,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.lifecycle.lifecycleScope
+import io.github.revocx35.rwr.MediaType
 import io.github.revocx35.rwr.Prefs
 import io.github.revocx35.rwr.R
+import io.github.revocx35.rwr.SaveTo
 import io.github.revocx35.rwr.alert.SnapshotStore
 import io.github.revocx35.rwr.detection.CameraTuning
+import io.github.revocx35.rwr.detection.DetectionMode
 import io.github.revocx35.rwr.detection.WatcherService
+import io.github.revocx35.rwr.server.ServerAccount
+import io.github.revocx35.rwr.server.ServerApi
 import io.github.revocx35.rwr.tile.WatchTileService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -66,6 +77,7 @@ class MainActivity : ComponentActivity() {
     /** Bumped on resume so permission rows re-read their state after returning from Settings. */
     private var resumeTick by mutableIntStateOf(0)
     private var startAfterGrant = false
+    private var account by mutableStateOf<ServerAccount?>(null)
 
     private val requestPerms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         resumeTick++
@@ -87,6 +99,35 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resumeTick++
+        account = ServerAccount.load(this)
+        refreshDevicePermission()
+    }
+
+    /** The admin may have changed this phone's "can configure" permission in the web UI. */
+    private fun refreshDevicePermission() {
+        val a = account ?: return
+        lifecycleScope.launch {
+            val info = withContext(Dispatchers.IO) { runCatching { ServerApi.deviceInfo(a) }.getOrNull() } ?: return@launch
+            val can = info.optBoolean("can_configure")
+            if (can != a.canConfigure) {
+                ServerAccount.updateCanConfigure(this@MainActivity, can)
+                account = ServerAccount.load(this@MainActivity)
+            }
+        }
+    }
+
+    private fun unpair() {
+        val a = account ?: return
+        lifecycleScope.launch {
+            // Best effort: revoke the token on the server too, so it is useless even if copied.
+            withContext(Dispatchers.IO) { runCatching { ServerApi.unpair(a) } }
+            ServerAccount.clear(this@MainActivity)
+            prefs.processOnServer = false
+            if (prefs.saveTo.immich) prefs.saveTo = SaveTo.GALLERY
+            account = null
+            WatcherService.reloadServer(this@MainActivity)
+            Toast.makeText(this@MainActivity, "Unpaired", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun has(permission: String) = checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
@@ -140,7 +181,8 @@ class MainActivity : ComponentActivity() {
             Text("RWR", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
             Text(
                 "Uses the front camera to spot people looking at your screen from behind, then alerts you " +
-                    "with a snapshot. Snapshots are saved to Pictures/${SnapshotStore.ALBUM}. Nothing leaves the device.",
+                    "with a snapshot or clip. They are saved to Pictures/${SnapshotStore.ALBUM}. Nothing leaves the " +
+                    "phone unless you pair your own RWR server.",
                 style = MaterialTheme.typography.bodyMedium,
             )
 
@@ -181,20 +223,35 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            Section("Settings") {
+            Section("Detection") {
+                var mode by remember { mutableStateOf(prefs.detectionMode) }
+                ChoiceRow(listOf(DetectionMode.HEAD, DetectionMode.EYE), mode, {
+                    if (it == DetectionMode.HEAD) "Head tracking" else "Eye tracking"
+                }) { mode = it; prefs.detectionMode = it }
+                Hint(
+                    if (mode == DetectionMode.HEAD) "Alerts when a head is turned toward the screen. Lightest on battery."
+                    else "Follows the irises: only alerts when the eyes point at the screen, even if the head is " +
+                        "turned. More accurate, more CPU on the phone (none in server mode)."
+                )
                 var ignoreOwner by remember { mutableStateOf(prefs.ignoreOwner) }
                 SwitchRow("Ignore my face (largest face in view)", ignoreOwner) {
                     ignoreOwner = it; prefs.ignoreOwner = it
                 }
-                var overlay by remember { mutableStateOf(prefs.overlayPopup) }
-                SwitchRow("Pop-up over other apps", overlay) { overlay = it; prefs.overlayPopup = it }
-
                 var angle by remember { mutableFloatStateOf(prefs.maxHeadAngle) }
-                Text("Sensitivity: head turned up to ${angle.roundToInt()}° counts as looking")
+                Text("Head turned up to ${angle.roundToInt()}° counts as looking" +
+                    if (mode == DetectionMode.EYE) " (used when a face is too small for eye tracking)" else "")
                 Slider(
                     value = angle, onValueChange = { angle = it }, valueRange = 10f..45f,
                     onValueChangeFinished = { prefs.maxHeadAngle = angle },
                 )
+                if (mode == DetectionMode.EYE) {
+                    var gaze by remember { mutableFloatStateOf(prefs.maxGazeAngle) }
+                    Text("Eyes within ${gaze.roundToInt()}° of the screen count as looking")
+                    Slider(
+                        value = gaze, onValueChange = { gaze = it }, valueRange = 5f..30f,
+                        onValueChangeFinished = { prefs.maxGazeAngle = gaze },
+                    )
+                }
                 var cooldown by remember { mutableFloatStateOf(prefs.cooldownSec.toFloat()) }
                 Text("Minimum time between alerts: ${cooldown.roundToInt()} s")
                 Slider(
@@ -202,6 +259,47 @@ class MainActivity : ComponentActivity() {
                     onValueChangeFinished = { prefs.cooldownSec = cooldown.roundToInt() },
                 )
             }
+
+            Section("Snapshots") {
+                var overlay by remember { mutableStateOf(prefs.overlayPopup) }
+                SwitchRow("Pop-up over other apps", overlay) { overlay = it; prefs.overlayPopup = it }
+
+                var media by remember { mutableStateOf(prefs.mediaType) }
+                ChoiceRow(listOf(MediaType.PHOTO, MediaType.VIDEO), media, {
+                    if (it == MediaType.PHOTO) "Photo" else "Video clip"
+                }) { media = it; prefs.mediaType = it }
+                if (media == MediaType.VIDEO) {
+                    var pre by remember { mutableFloatStateOf(prefs.preSec.toFloat()) }
+                    var post by remember { mutableFloatStateOf(prefs.postSec.toFloat()) }
+                    Text("Clip: ${pre.roundToInt()} s before to ${post.roundToInt()} s after the alert")
+                    Text("Before", style = MaterialTheme.typography.bodySmall)
+                    Slider(value = pre, onValueChange = { pre = it }, valueRange = 0f..30f, steps = 29,
+                        onValueChangeFinished = { prefs.preSec = pre.roundToInt() })
+                    Text("After", style = MaterialTheme.typography.bodySmall)
+                    Slider(value = post, onValueChange = { post = it }, valueRange = 0f..30f, steps = 29,
+                        onValueChangeFinished = { prefs.postSec = post.roundToInt() })
+                    Hint("Clips keep the last seconds of camera frames in memory, which costs some battery. " +
+                        "The clip frame rate follows the camera frame rate under Battery.")
+                }
+
+                val paired = account != null
+                var saveTo by remember { mutableStateOf(prefs.saveTo) }
+                Text("Save to")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(SaveTo.GALLERY, SaveTo.IMMICH, SaveTo.BOTH).forEach { option ->
+                        FilterChip(
+                            selected = option == saveTo,
+                            enabled = option == SaveTo.GALLERY || paired,
+                            onClick = { saveTo = option; prefs.saveTo = option },
+                            label = { Text(option.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                        )
+                    }
+                }
+                Hint(if (paired) "Immich uploads go through your RWR server (set Immich up in Server settings)."
+                    else "Immich needs a paired RWR server (see Server below).")
+            }
+
+            ServerSection()
             Section("Battery") {
                 var fps by remember { mutableIntStateOf(prefs.cameraFps) }
                 Text("Camera frame rate")
@@ -225,6 +323,64 @@ class MainActivity : ComponentActivity() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+
+    @Composable
+    private fun ServerSection() {
+        val a = account
+        val state by WatcherService.serverState.collectAsStateWithLifecycle()
+        val running by WatcherService.running.collectAsStateWithLifecycle()
+        Section("Server") {
+            if (a == null) {
+                Text("Run detection on your own RWR server (Docker) instead of the phone: max-quality " +
+                    "detection without the CPU cost, plus saving to Immich.")
+                OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, PairActivity::class.java)) },
+                    modifier = Modifier.fillMaxWidth()) { Text("Pair with server") }
+                return@Section
+            }
+            Text("Paired with ${a.baseUrl} as “${a.deviceName}”", style = MaterialTheme.typography.bodyMedium)
+            var onServer by remember { mutableStateOf(prefs.processOnServer) }
+            Text("Detection runs")
+            ChoiceRow(listOf(false, true), onServer, { if (it) "On server" else "On this phone" }) {
+                onServer = it; prefs.processOnServer = it
+            }
+            if (onServer && running) {
+                Text(
+                    when (state) {
+                        WatcherService.ServerState.CONNECTED -> "● Connected, frames go to the server"
+                        WatcherService.ServerState.CONNECTING -> "○ Connecting…"
+                        WatcherService.ServerState.FALLBACK -> "○ Server unreachable, detecting on the phone"
+                        WatcherService.ServerState.REJECTED -> "✗ The server removed this phone. Unpair and pair again."
+                        WatcherService.ServerState.OFF -> "○ Paused"
+                    },
+                    color = if (state == WatcherService.ServerState.CONNECTED) Color(0xFF2E7D32)
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (onServer) {
+                var fallback by remember { mutableStateOf(prefs.fallbackLocal) }
+                SwitchRow("Detect on the phone while the server is unreachable", fallback) {
+                    fallback = it; prefs.fallbackLocal = it
+                }
+                Hint("Frames are sent at the camera frame rate (Battery section) over an encrypted connection " +
+                    "locked to your server's certificate.")
+            }
+            if (a.canConfigure) {
+                OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, ServerSettingsActivity::class.java)) },
+                    modifier = Modifier.fillMaxWidth()) { Text("Server settings (Immich, history…)") }
+            }
+            var confirm by remember { mutableStateOf(false) }
+            OutlinedButton(onClick = { confirm = true }, modifier = Modifier.fillMaxWidth()) { Text("Unpair") }
+            if (confirm) {
+                AlertDialog(
+                    onDismissRequest = { confirm = false },
+                    title = { Text("Unpair from the server?") },
+                    text = { Text("This phone's access is revoked on the server. You can pair again with a new QR code.") },
+                    confirmButton = { TextButton(onClick = { confirm = false; unpair() }) { Text("Unpair") } },
+                    dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+                )
+            }
         }
     }
 

@@ -24,3 +24,4 @@ keystore.properties
 scripts/out/
 scripts/__pycache__/
 *.log
+app/src/main/assets/face_landmarker.task*

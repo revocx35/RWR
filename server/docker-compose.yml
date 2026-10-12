@@ -1,0 +1,35 @@
+# RWR detection server. Quick start:
+#   cp .env.example .env   # set RWR_TLS_HOSTNAMES to this machine's LAN IP / hostname
+#   docker compose up -d --build
+#   docker compose logs rwr | grep -A3 "first start"   # one-time admin password
+# Then open https://<host>:8443 and pair your phone under Devices.
+services:
+  rwr:
+    build: .
+    image: rwr-server:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${RWR_BIND:-0.0.0.0}:${RWR_HOST_PORT:-8443}:8443"
+    volumes:
+      - rwr-data:/data
+    # Hardening: unprivileged user, read-only root filesystem, no Linux capabilities, no privilege escalation.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  rwr-data:

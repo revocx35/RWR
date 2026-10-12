@@ -12,9 +12,14 @@ data class FaceBox(
     val yaw: Float,
     /** Head pitch (up/down tilt); 0 = facing the camera. */
     val pitch: Float,
+    /** Eye mode: "laser" lines from the irises along the gaze, drawn on the snapshot. */
+    val rays: List<Ray> = emptyList(),
 ) {
     val area: Int get() = (right - left).coerceAtLeast(0) * (bottom - top).coerceAtLeast(0)
+    val width: Int get() = right - left
 }
+
+enum class DetectionMode { HEAD, EYE }
 
 /**
  * Decides which faces in a frame count as onlookers. Pure Kotlin so it is unit-tested on the JVM.
@@ -31,6 +36,25 @@ object OnlookerPolicy {
 
     fun isLookingAtCamera(face: FaceBox, maxHeadAngle: Float): Boolean =
         abs(face.yaw) <= maxHeadAngle && abs(face.pitch) <= maxHeadAngle
+
+    /** Faces that may be onlookers, before the per-face eye check. */
+    fun candidates(faces: List<FaceBox>, ignoreOwner: Boolean): List<FaceBox> {
+        val owner = if (ignoreOwner) faces.maxByOrNull { it.area } else null
+        return faces.filter { it !== owner }
+    }
+
+    /** Eye tracking only runs on faces turned at most this far (beyond it the eyes can't reach the screen). */
+    const val EYE_PREFILTER_ANGLE = 60f
+    /** Below this face width the irises are a few pixels wide: decide by head pose instead. */
+    const val MIN_EYE_FACE_PX = 40
+
+    /**
+     * Eye mode decision for one face. With a usable [gaze], the eyes decide (head pose + eye rotation);
+     * otherwise (face too small, landmarks not found) it falls back to the head rule.
+     */
+    fun isLookingEyeMode(face: FaceBox, gaze: Gaze?, maxHeadAngle: Float, maxGazeAngle: Float): Boolean =
+        if (gaze != null && face.width >= MIN_EYE_FACE_PX) GazeEstimator.isLooking(gaze, maxGazeAngle)
+        else isLookingAtCamera(face, maxHeadAngle)
 }
 
 /**

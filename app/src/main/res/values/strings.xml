@@ -12,4 +12,14 @@
     <string name="alert_dismiss">Dismiss</string>
     <string name="alert_open_gallery">Open photo</string>
     <string name="alert_saved">Saved to Pictures/RWR</string>
+    <string name="alert_recording">recording clip…</string>
+    <string name="alert_clip_saved">clip saved to Pictures/RWR</string>
+    <string name="alert_clip_done">clip done</string>
+    <string name="alert_open_clip">Open clip</string>
+    <string name="alert_saving_clip">Saving clip…</string>
+    <string name="alert_sent_immich">sent to Immich</string>
+    <string name="alert_immich_server">server saves to Immich</string>
+    <string name="notif_server_text">Detection runs on your RWR server</string>
+    <string name="notif_fallback_text">Server unreachable, detecting on the phone</string>
+    <string name="notif_connecting_text">Connecting to your RWR server…</string>
 </resources>

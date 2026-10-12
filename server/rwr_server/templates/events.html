@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Events</h1>
+{% if events %}
+<div class="events">
+{% for e in events %}
+  <article class="card event">
+    {% if e.file %}
+      {% if e.kind == "video" %}<video controls preload="none" src="/events/{{ e.id }}/media"></video>
+      {% else %}<a href="/events/{{ e.id }}/media"><img loading="lazy" src="/events/{{ e.id }}/media" alt="Snapshot"></a>{% endif %}
+    {% else %}<p class="muted">Not kept on the server.</p>{% endif %}
+    <p><strong>{{ e.at|dt }}</strong> · {{ e.kind }} · {{ e.onlookers }} person(s)<br>
+    <span class="muted small">{{ e.device or "unknown device" }} · detected on {{ "server" if e.source == "server" else "phone" }}{% if e.mode %} · {{ e.mode }} mode{% endif %}</span><br>
+    <span class="small">Immich: {{ e.immich_status or "not requested" }}{% if e.immich_status == "error" %} – {{ e.immich_detail }}{% endif %}</span></p>
+    <form method="post" action="/events/{{ e.id }}/delete" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button class="link danger-text">Delete</button>
+    </form>
+  </article>
+{% endfor %}
+</div>
+<p>{% if page > 0 %}<a href="/events?page={{ page - 1 }}">← Newer</a> {% endif %}{% if events|length == 25 %}<a href="/events?page={{ page + 1 }}">Older →</a>{% endif %}</p>
+{% else %}<p class="muted">No events{% if page %} on this page{% endif %}.</p>{% endif %}
+{% endblock %}

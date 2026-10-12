@@ -11,9 +11,10 @@
     <!-- Pop-up over other apps when an onlooker is detected. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
-    <!-- ML Kit's manifest adds these for usage telemetry. The bundled face model works offline, and
-         "nothing leaves the device" is a product promise, so strip them. -->
-    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <!-- Only for the optional, user-paired RWR server (TLS, pinned). Detection on the phone stays offline:
+         the bundled ML Kit and MediaPipe models need no network, and no analytics are included. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- ML Kit's manifest adds this for usage telemetry; not needed. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
     <application
@@ -21,6 +22,8 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="false"
         android:supportsRtl="true"
         android:theme="@style/Theme.Rwr">
 
@@ -37,6 +40,16 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.PairActivity"
+            android:exported="false"
+            android:label="Pair with server" />
+
+        <activity
+            android:name=".ui.ServerSettingsActivity"
+            android:exported="false"
+            android:label="Server settings" />
 
         <!-- Invisible trampoline: a camera foreground service may only be started while the app
              is in the foreground, so the tile launches this, which starts the service and finishes. -->

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="grid">
+  <section class="card">
+    <h2>Streaming now</h2>
+    {% if streams %}
+    <table><tr><th>Device</th><th>Mode</th><th>Frames in/s</th><th>Analysed/s</th></tr>
+    {% for s in streams %}<tr><td>{{ s.name }}</td><td>{{ s.mode }}</td><td>{{ s.fps_in }}</td><td>{{ s.fps_analysed }}</td></tr>{% endfor %}
+    </table>
+    {% else %}<p class="muted">No phone is streaming. {{ devices }} paired device(s).</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Server</h2>
+    <p>Immich: <strong>{{ "on" if settings.immich_enabled else "off" }}</strong>{% if settings.immich_enabled %} · album “{{ settings.immich_album }}”{% endif %}</p>
+    <p>Keep events on server: <strong>{{ "%d days"|format(settings.retention_days) if settings.keep_events else "no" }}</strong></p>
+    <p class="muted small">TLS certificate SHA-256:<br><code class="wrap">{{ fingerprint }}</code></p>
+  </section>
+</div>
+<section class="card">
+  <h2>Recent events</h2>
+  {% if events %}
+  <table><tr><th>Time</th><th>Type</th><th>People</th><th>Detected on</th><th>Immich</th></tr>
+  {% for e in events %}<tr><td>{{ e.at|dt }}</td><td>{{ e.kind }}</td><td>{{ e.onlookers }}</td><td>{{ "server" if e.source == "server" else "phone" }}</td><td>{{ e.immich_status or "–" }}</td></tr>{% endfor %}
+  </table>
+  <p><a href="/events">All events →</a></p>
+  {% else %}<p class="muted">Nothing yet.</p>{% endif %}
+</section>
+<section class="card">
+  <h2>Security log</h2>
+  <table><tr><th>Time</th><th>IP</th><th>Event</th><th>Detail</th></tr>
+  {% for a in audit %}<tr><td>{{ a.at|dt }}</td><td>{{ a.ip or "" }}</td><td>{{ a.action }}</td><td>{{ a.detail or "" }}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

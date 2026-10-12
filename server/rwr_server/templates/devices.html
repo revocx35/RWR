@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Devices</h1>
+<section class="card">
+  <h2>Pair a phone</h2>
+  <p>Creates a one-time QR code (valid 10 minutes). In the RWR app: <em>Server → Pair with server → Scan QR</em>.</p>
+  <form method="post" action="/devices/pair">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="check"><input type="checkbox" name="can_configure" checked> Allow this phone to change server settings (Immich, retention, detector)</label>
+    <button>Create pairing code</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Paired phones</h2>
+  {% if devices %}
+  <table><tr><th>Name</th><th>Status</th><th>Paired</th><th>Last seen</th><th>Can configure</th><th></th></tr>
+  {% for d in devices %}
+  <tr>
+    <td>{{ d.name }}</td>
+    <td>{{ "streaming" if d.id in online else "idle" }}</td>
+    <td>{{ d.created|dt }}</td>
+    <td>{{ d.last_seen|dt if d.last_seen else "–" }}{% if d.last_ip %}<br><span class="muted small">{{ d.last_ip }}</span>{% endif %}</td>
+    <td>
+      <form method="post" action="/devices/{{ d.id }}/permission" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="can_configure" value="{{ "0" if d.can_configure else "1" }}">
+        {{ "yes" if d.can_configure else "no" }} <button class="link">{{ "revoke" if d.can_configure else "allow" }}</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/devices/{{ d.id }}/revoke" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="danger">Remove</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </table>
+  {% else %}<p class="muted">No phones paired yet.</p>{% endif %}
+</section>
+{% endblock %}
