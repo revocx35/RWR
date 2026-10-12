@@ -59,6 +59,17 @@ adb shell am broadcast -n io.github.revocx35.rwr/.DebugInjectReceiver --es path 
 - License is GPL-3.0 (`LICENSE`). New dependencies must be GPLv3-compatible.
 - Test photos of people are **not** committed. Generate or download them into a scratch dir.
 
+## Releasing
+
+1. Bump `versionCode` and `versionName` in `app/build.gradle.kts`, then commit.
+2. `./gradlew clean testDebugUnitTest assembleRelease`. Signing comes from `keystore.properties`, which is git-ignored.
+   On the dev LXC it's a symlink to the key material kept **outside the repo** in a `chmod 700` directory.
+   Never copy the keystore or its password into the repo, docs, or release notes.
+3. Smoke-test the signed `app/build/outputs/apk/release/app-release.apk` on the emulator (see above).
+4. `gh release create vX.Y.Z RWR-X.Y.Z.apk --notes-file ...`. Include the APK SHA-256 and the signing cert
+   fingerprint (`apksigner verify --print-certs`).
+   Every release must use the same key, or Android refuses to install the update over the old version.
+
 ## Before publishing to GitHub
 
 Run a secret/leak scan over the tree and history (IPs, passwords, tokens, keys, keystores, `local.properties`,
