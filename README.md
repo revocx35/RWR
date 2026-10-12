@@ -30,7 +30,7 @@ uploads snapshots and clips to **Immich**.
 ```sh
 git clone https://github.com/revocx35/RWR && cd RWR/server
 cp .env.example .env            # set RWR_TLS_HOSTNAMES to the server's LAN IP / hostname
-docker compose up -d --build
+docker compose pull && docker compose up -d     # prebuilt image (or: docker compose up -d --build)
 docker compose logs rwr | grep -A4 "first start"     # one-time admin password
 ```
 

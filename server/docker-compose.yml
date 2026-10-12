@@ -1,12 +1,13 @@
 # RWR detection server. Quick start:
 #   cp .env.example .env   # set RWR_TLS_HOSTNAMES to this machine's LAN IP / hostname
-#   docker compose up -d --build
+#   docker compose pull && docker compose up -d      # prebuilt image from ghcr.io
+#   (or: docker compose up -d --build                  # build from this checkout instead)
 #   docker compose logs rwr | grep -A3 "first start"   # one-time admin password
 # Then open https://<host>:8443 and pair your phone under Devices.
 services:
   rwr:
     build: .
-    image: rwr-server:local
+    image: ghcr.io/revocx35/rwr-server:${RWR_VERSION:-1.1.0}
     restart: unless-stopped
     env_file:
       - path: .env

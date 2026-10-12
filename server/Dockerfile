@@ -1,5 +1,9 @@
 FROM python:3.12-slim-trixie
 
+LABEL org.opencontainers.image.source="https://github.com/revocx35/RWR" \
+      org.opencontainers.image.description="RWR onlooker detection server" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
+
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # MediaPipe's native library links against GLES/EGL even when running on the CPU.

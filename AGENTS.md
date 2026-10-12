@@ -44,6 +44,9 @@ docker compose -p rwrtest up -d --build        # local instance; settings come f
   breaks the Origin check. Keep `same-origin`. TestClient sends no Origin header, so add explicit
   Origin tests.
 - Recovery: `docker compose exec rwr python -m rwr_server.admin reset-password`.
+- Published image: `ghcr.io/revocx35/rwr-server:<version>` + `latest`. On release: bump `RWR_VERSION`'s default in
+  `docker-compose.yml`, `docker build -t ghcr.io/revocx35/rwr-server:X.Y.Z -t ...:latest .`, check that `/data` is empty
+  in the image, `gh auth token | docker login ghcr.io -u revocx35 --password-stdin`, push, `docker logout ghcr.io`.
 
 ## Emulator end-to-end test (KVM is available on the dev LXC)
 
