@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -54,6 +55,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.revocx35.rwr.Prefs
 import io.github.revocx35.rwr.R
 import io.github.revocx35.rwr.alert.SnapshotStore
+import io.github.revocx35.rwr.detection.CameraTuning
 import io.github.revocx35.rwr.detection.WatcherService
 import io.github.revocx35.rwr.tile.WatchTileService
 import kotlin.math.roundToInt
@@ -200,6 +202,23 @@ class MainActivity : ComponentActivity() {
                     onValueChangeFinished = { prefs.cooldownSec = cooldown.roundToInt() },
                 )
             }
+            Section("Battery") {
+                var fps by remember { mutableIntStateOf(prefs.cameraFps) }
+                Text("Camera frame rate")
+                ChoiceRow(CameraTuning.FPS_CHOICES, fps, { "$it fps" }) { fps = it; prefs.cameraFps = it }
+                Hint("Lower uses less battery. If your phone can't go that low, the closest rate it supports is used.")
+
+                var lowRes by remember { mutableStateOf(prefs.lowResolution) }
+                Text("Camera resolution")
+                ChoiceRow(listOf(true, false), lowRes, { if (it) "Low 640×480" else "High 1280×720" }) {
+                    lowRes = it; prefs.lowResolution = it
+                }
+                Hint("High gives sharper snapshots but uses more power.")
+
+                var efficient by remember { mutableStateOf(prefs.efficientConversion) }
+                SwitchRow("Convert only analysed frames", efficient) { efficient = it; prefs.efficientConversion = it }
+                Hint("Recommended. Turning it off converts every camera frame (the old behaviour). Only useful for troubleshooting.")
+            }
             Text(
                 "Tip: Android shows a green camera dot while RWR is watching. The camera is released " +
                     "automatically while the screen is off.",
@@ -228,6 +247,24 @@ class MainActivity : ComponentActivity() {
                 OutlinedButton(onClick = onGrant) { Text("Grant") }
             }
         }
+    }
+
+    @Composable
+    private fun <T> ChoiceRow(options: List<T>, selected: T, label: (T) -> String, onSelect: (T) -> Unit) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.forEach { option ->
+                FilterChip(
+                    selected = option == selected,
+                    onClick = { onSelect(option) },
+                    label = { Text(label(option)) },
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun Hint(text: String) {
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 
     @Composable

@@ -8,6 +8,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -15,11 +16,18 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.os.PowerManager
 import android.service.quicksettings.TileService
 import android.util.Log
+import android.util.Range
 import android.util.Size
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -77,6 +85,7 @@ class WatcherService : LifecycleService() {
         prefs = Prefs(this)
         presenter = AlertPresenter(this)
         finder = FaceFinder()
+        prefs.register(prefListener)
         ContextCompat.registerReceiver(
             this, screenReceiver,
             IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) },
@@ -122,6 +131,7 @@ class WatcherService : LifecycleService() {
 
     override fun onDestroy() {
         _running.value = false
+        prefs.unregister(prefListener)
         unregisterReceiver(screenReceiver)
         cameraProvider?.unbindAll()
         presenter.dismissOverlay()
@@ -139,28 +149,59 @@ class WatcherService : LifecycleService() {
                 Log.e(TAG, "camera provider unavailable", it); stopSelf(); return@addListener
             }
             cameraProvider = provider
-            val analysis = ImageAnalysis.Builder()
-                .setResolutionSelector(
-                    ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
-                        ).build()
-                )
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
+            val analysis = buildAnalysis(provider)
             analysis.setAnalyzer(analysisExecutor, ::analyze)
             try {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
                 gate.reset()
                 updateStatusNotification(paused = false)
-                Log.i(TAG, "camera bound")
+                Log.i(TAG, "camera bound: ${analysis.resolutionInfo?.resolution}, fps=$appliedFpsRange, " +
+                    if (prefs.efficientConversion) "YUV" else "RGBA")
             } catch (e: Exception) {
                 Log.e(TAG, "cannot bind front camera", e)
                 stopSelf()
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /** Last FPS range requested from the camera, for logging. */
+    private var appliedFpsRange: IntRange? = null
+
+    /** Builds the analysis use case from the battery settings (frame rate, resolution, frame format). */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun buildAnalysis(provider: ProcessCameraProvider): ImageAnalysis {
+        val size = if (prefs.lowResolution) Size(640, 480) else Size(1280, 720)
+        val builder = ImageAnalysis.Builder()
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(size, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+                    ).build()
+            )
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            // YUV is the camera's native format; toBitmap() converts only the frames we analyse.
+            // RGBA makes CameraX convert every delivered frame, even the ones we throw away.
+            .setOutputImageFormat(
+                if (prefs.efficientConversion) ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888
+                else ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888
+            )
+        val supported = CameraSelector.DEFAULT_FRONT_CAMERA.filter(provider.availableCameraInfos).firstOrNull()
+            ?.let { Camera2CameraInfo.from(it).getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) }
+            ?.map { it.lower..it.upper }
+            .orEmpty()
+        appliedFpsRange = CameraTuning.chooseFpsRange(supported, prefs.cameraFps)?.also {
+            Camera2Interop.Extender(builder)
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(it.first, it.last))
+        }
+        return builder.build()
+    }
+
+    /** Battery settings changed in the UI: rebind so they apply right away. */
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key in Prefs.CAMERA_KEYS && _running.value &&
+            getSystemService(PowerManager::class.java).isInteractive
+        ) startCamera()
     }
 
     private fun pauseCamera() {

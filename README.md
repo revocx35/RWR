@@ -21,6 +21,10 @@ detector; nothing is uploaded and the app has no internet permission.
 Settings: ignore your own face (largest face in view, on by default), pop-up on/off, sensitivity (how
 far a head may be turned and still count as looking), and the minimum time between alerts.
 
+Battery: camera frame rate (default 5 fps, or the lowest your phone supports), camera resolution
+(low 640×480 by default, high 1280×720 for sharper snapshots), and "convert only analysed frames"
+(leave on). The camera is always off while the screen is off.
+
 Notes:
 - Android shows the green camera-in-use dot while watching. The camera is released while the screen is off.
 - The pop-up cannot appear over the system Settings app (Android hides third-party overlays there);

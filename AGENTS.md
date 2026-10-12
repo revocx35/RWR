@@ -42,6 +42,12 @@ Emulator camera gotchas (learned the hard way):
   `scripts/emu_start.sh` handles this.
 - The `npm_test`/`wal_test` AVDs belong to other projects. Use `rwr_test`.
 
+CPU measurement: `scripts/measure_cpu.sh LABEL` while watching. To compare builds, install the old release APK,
+measure, then `adb install -r` the new one (this also checks that the update installs over the old version) and measure
+again. While the test scene is in view it alerts every 15 s and the pop-up covers the middle of the screen, so taps
+on the settings can land on the pop-up. Dismiss it and tap immediately, and check the result with `grep "camera bound"`.
+The emulator camera tops out at 640×480, so the High resolution setting can't be tested there.
+
 Debug-only frame injection (bypasses the camera, same detection/alert path; frames are interleaved with
 camera frames, so inject 2–3 times quickly to satisfy the 2-of-3 gate):
 

@@ -21,8 +21,8 @@ android {
         // 29: MediaStore RELATIVE_PATH lets us write to the gallery without storage permissions.
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     dependenciesInfo {
