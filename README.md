@@ -41,3 +41,7 @@ Release signing: create `keystore.properties` (git-ignored) with `storeFile`, `s
 `keyAlias`, `keyPassword`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works and [AGENTS.md](AGENTS.md) for contributor/agent notes.
+
+## License
+
+RWR is free software, licensed under the [GNU General Public License v3.0](LICENSE).

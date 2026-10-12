@@ -56,6 +56,7 @@ adb shell am broadcast -n io.github.revocx35.rwr/.DebugInjectReceiver --es path 
 - All frame processing runs on `WatcherService.analysisExecutor` (single thread). UI/overlay work goes to the main thread.
 - Debug-only code goes behind `BuildConfig.DEBUG` or in `src/debug/`. Never ship an exported test hook in release.
 - Don't add INTERNET permission or analytics. "Nothing leaves the device" is a product promise in the UI.
+- License is GPL-3.0 (`LICENSE`). New dependencies must be GPLv3-compatible.
 - Test photos of people are **not** committed. Generate or download them into a scratch dir.
 
 ## Before publishing to GitHub
