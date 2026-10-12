@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Rwr" parent="android:Theme.Material.NoActionBar" />
+
+    <style name="Theme.Rwr.Invisible" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowNoDisplay">false</item>
+    </style>
+
+    <color name="ic_launcher_background">#FF1B1F2A</color>
+    <color name="alert_red">#FFD32F2F</color>
+</resources>

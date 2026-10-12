@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RWR</string>
+    <string name="tile_label">Onlooker alert</string>
+    <string name="channel_watch">Watching status</string>
+    <string name="channel_alert">Onlooker alerts</string>
+    <string name="notif_watching_title">RWR is watching</string>
+    <string name="notif_watching_text">Front camera checks for people looking at your screen.</string>
+    <string name="notif_paused_text">Paused while the screen is off.</string>
+    <string name="action_stop">Stop</string>
+    <string name="alert_title">Someone is looking at your screen</string>
+    <string name="alert_dismiss">Dismiss</string>
+    <string name="alert_open_gallery">Open photo</string>
+    <string name="alert_saved">Saved to Pictures/RWR</string>
+</resources>

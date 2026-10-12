@@ -1,0 +1,26 @@
+# Build outputs
+build/
+.gradle/
+.kotlin/
+*.apk
+*.aab
+captures/
+
+# Machine-local / secrets — never commit
+local.properties
+keystore.properties
+*.jks
+*.keystore
+.env
+.env.*
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Test artifacts
+scripts/out/
+scripts/__pycache__/
+*.log
