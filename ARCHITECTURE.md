@@ -132,6 +132,13 @@ Assets: camera frames and clips of people behind the user, the admin account, de
 | Container compromise impact | Non-root (uid 10001), read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, pids and memory limits; only `/data` is writable. |
 | Self-signed certificate in the browser | The first visit shows a warning; check the SHA-256 fingerprint printed in the log and on the dashboard, or bring your own certificate. `Referrer-Policy: same-origin`, because `no-referrer` makes browsers send `Origin: null` and breaks the CSRF check. |
 
+Reverse-proxy mode (`RWR_TLS=off`): TLS is terminated by the proxy. The proxy's certificate changes on
+renewal, so pairing codes carry no pin (`RWR_PAIRING_PIN=none`) and the app validates it against the phone's
+trusted CAs. That needs a publicly trusted certificate, e.g. Let's Encrypt. Client IPs come from
+`X-Forwarded-For`, but only when the peer is in `RWR_TRUSTED_PROXIES`. The hop between proxy and server is
+plaintext, so firewall the port to the proxy only. A proxy can also forward to `https://` with the self-signed
+backend certificate, which keeps that hop encrypted.
+
 Known limits:
 - No per-user accounts (single admin).
 - Self-signed certificate: the browser warning is accepted once by hand. The phone is unaffected because it uses the pin.

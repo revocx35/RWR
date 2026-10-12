@@ -44,8 +44,8 @@ def create_app(cfg: Config, detector=None) -> FastAPI:
     """[detector] is injectable so tests can run without the ML models."""
     db = DB(cfg.db_path)
     events = EventStore(db, cfg.events_dir)
-    cert_path, _ = tls.ensure_certificate(cfg)
-    cert = tls.load_cert(cert_path)
+    if cfg.tls:
+        cert = tls.load_cert(tls.ensure_certificate(cfg)[0])
 
     if detector is None:
         from .detector import Detector
@@ -70,8 +70,10 @@ def create_app(cfg: Config, detector=None) -> FastAPI:
     app.state.db = db
     app.state.events = events
     app.state.hub = hub
-    app.state.pin = tls.spki_pin(cert)
-    app.state.fingerprint = tls.fingerprint(cert)
+    # Behind a reverse proxy the phone sees the proxy's certificate, so there is nothing of ours to pin:
+    # the app then validates the proxy's certificate against the phone's trusted CAs.
+    app.state.pin = tls.spki_pin(cert) if cfg.tls else None
+    app.state.fingerprint = tls.fingerprint(cert) if cfg.tls else None
     app.state.templates = Jinja2Templates(directory=str(HERE / "templates"))
     app.state.templates.env.filters["dt"] = lambda ts: datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 

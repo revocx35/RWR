@@ -282,11 +282,11 @@ async def pair_new(request: Request):
     cfg = request.app.state.cfg
     base = cfg.public_url or str(request.base_url).rstrip("/")
     query = {"u": base, "c": code}
-    if cfg.pairing_pin == "auto":
+    if cfg.pairing_pin == "auto" and request.app.state.pin:
         query["p"] = request.app.state.pin
     link = "rwr://pair?" + urllib.parse.urlencode(query)
     qr = segno.make(link, error="m").svg_data_uri(scale=6, border=2)
-    return _render(request, "pair.html", {"csrf": s.csrf, "qr": qr, "link": link, "minutes": PAIRING_TTL_S // 60, "base": base})
+    return _render(request, "pair.html", {"csrf": s.csrf, "insecure_base": not base.startswith("https://"), "qr": qr, "link": link, "minutes": PAIRING_TTL_S // 60, "base": base})
 
 
 @router.post("/devices/{device_id}/revoke")

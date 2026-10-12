@@ -53,6 +53,10 @@ Security:
 
 Details are in [ARCHITECTURE.md](ARCHITECTURE.md#threat-model-server-mode).
 
+**Behind a reverse proxy** (Nginx Proxy Manager etc.): set `RWR_TLS=off`, `RWR_PUBLIC_URL=https://<your domain>`,
+`RWR_TRUSTED_PROXIES=<proxy IP>` and `RWR_PAIRING_PIN=none` in `.env`. Point the proxy at `http://<server>:8443` with
+WebSocket support and a valid (e.g. Let's Encrypt) certificate, and make sure only the proxy can reach port 8443.
+
 Locked out? `docker compose exec rwr python -m rwr_server.admin reset-password`
 
 ## Install & use the app

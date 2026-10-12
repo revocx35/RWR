@@ -2,6 +2,8 @@
 {% block content %}
 <section class="card narrow center">
   <h1>Scan with the RWR app</h1>
+  {% if insecure_base %}<p class="flash err">This address is not https://, so the app will refuse it. Behind a reverse
+  proxy, set RWR_PUBLIC_URL to the proxy's https:// address.</p>{% endif %}
   <img class="qr" src="{{ qr }}" alt="Pairing QR code">
   <p>Valid for {{ minutes }} minutes, works once. The phone will connect to <code>{{ base }}</code>.</p>
   <details><summary>Can't scan? Copy the pairing link</summary>

@@ -14,7 +14,8 @@
     <h2>Server</h2>
     <p>Immich: <strong>{{ "on" if settings.immich_enabled else "off" }}</strong>{% if settings.immich_enabled %} · album “{{ settings.immich_album }}”{% endif %}</p>
     <p>Keep events on server: <strong>{{ "%d days"|format(settings.retention_days) if settings.keep_events else "no" }}</strong></p>
-    <p class="muted small">TLS certificate SHA-256:<br><code class="wrap">{{ fingerprint }}</code></p>
+    {% if fingerprint %}<p class="muted small">TLS certificate SHA-256:<br><code class="wrap">{{ fingerprint }}</code></p>
+    {% else %}<p class="muted small">Plain HTTP mode: TLS is terminated by your reverse proxy.</p>{% endif %}
   </section>
 </div>
 <section class="card">

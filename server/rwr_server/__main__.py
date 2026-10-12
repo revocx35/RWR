@@ -51,16 +51,25 @@ def main() -> None:
     os.umask(0o077)
     db = DB(cfg.db_path)
     ensure_admin(db)
-    cert_path, key_path = tls.ensure_certificate(cfg)
-    cert = tls.load_cert(cert_path)
-    log.info("TLS certificate SHA-256 fingerprint (check it on the browser's first visit): %s", tls.fingerprint(cert))
-    log.info("listening on https://0.0.0.0:%d", cfg.port)
+    ssl_args = {}
+    if cfg.tls:
+        cert_path, key_path = tls.ensure_certificate(cfg)
+        cert = tls.load_cert(cert_path)
+        log.info("TLS certificate SHA-256 fingerprint (check it on the browser's first visit): %s", tls.fingerprint(cert))
+        ssl_args = {"ssl_certfile": str(cert_path), "ssl_keyfile": str(key_path)}
+        log.info("listening on https://0.0.0.0:%d", cfg.port)
+    else:
+        log.warning("RWR_TLS=off: serving plain HTTP on port %d. Only run this behind a TLS reverse proxy, "
+                    "and keep the port reachable only from that proxy.", cfg.port)
+        if not cfg.public_url.startswith("https://"):
+            log.warning("RWR_PUBLIC_URL should be the proxy's https:// address, or pairing codes won't work")
+        if not cfg.trusted_proxies:
+            log.warning("RWR_TRUSTED_PROXIES is empty: every client will look like the proxy to the login rate limiter")
     uvicorn.run(
         create_app(cfg),
         host="0.0.0.0",
         port=cfg.port,
-        ssl_certfile=str(cert_path),
-        ssl_keyfile=str(key_path),
+        **ssl_args,
         server_header=False,
         proxy_headers=False,          # client IPs from proxies are handled explicitly (RWR_TRUSTED_PROXIES)
         ws_max_size=MAX_FRAME_BYTES + 64,

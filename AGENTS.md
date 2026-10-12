@@ -43,6 +43,9 @@ docker compose -p rwrtest up -d --build        # local instance; settings come f
 - Browser gotcha: `Referrer-Policy: no-referrer` makes browsers send `Origin: null` on form POSTs, which
   breaks the Origin check. Keep `same-origin`. TestClient sends no Origin header, so add explicit
   Origin tests.
+- Reverse-proxy mode: `RWR_TLS=off` (`Config.tls`). With it there is no own certificate, `app.state.pin` and
+  `fingerprint` are `None`, the healthcheck uses http, and startup warns about a missing https `RWR_PUBLIC_URL` or
+  `RWR_TRUSTED_PROXIES`. Tested in `test_reverse_proxy_mode_pairs_without_pin`.
 - Recovery: `docker compose exec rwr python -m rwr_server.admin reset-password`.
 - Published image: `ghcr.io/revocx35/rwr-server:<version>` + `latest`. On release: bump `RWR_VERSION`'s default in
   `docker-compose.yml`, `docker build -t ghcr.io/revocx35/rwr-server:X.Y.Z -t ...:latest .`, check that `/data` is empty

@@ -45,6 +45,34 @@ def test_pairing_code_works_once(admin, app, client):
     assert app.state.db.one("SELECT token_hash FROM devices")["token_hash"] == security.token_hash(token)
 
 
+def test_reverse_proxy_mode_pairs_without_pin(cfg, monkeypatch):
+    """RWR_TLS=off: no own certificate, the pairing link carries the proxy's https URL and no pin."""
+    import html, re, urllib.parse
+    from fastapi.testclient import TestClient
+    from rwr_server.app import create_app
+    from conftest import FakeDetector, ADMIN_PW, login
+    monkeypatch.setenv("RWR_TLS", "off")
+    monkeypatch.setenv("RWR_PUBLIC_URL", "https://rwr.example.com")
+    monkeypatch.setenv("RWR_TRUSTED_PROXIES", "10.9.8.7/32")
+    from rwr_server.config import Config
+    app = create_app(Config(), detector=FakeDetector())
+    app.state.db.execute("INSERT INTO admin(id, username, password_hash, must_change, password_changed_at) "
+                         "VALUES(1, 'admin', ?, 0, 0)", (security.hash_password(ADMIN_PW),))
+    assert app.state.pin is None
+    with TestClient(app, base_url="https://rwr.example.com", client=("10.9.8.7", 5555)) as c:
+        assert login(c).status_code == 303
+        page = c.post("/devices/pair", data={"csrf": csrf_of(c.get("/devices").text)})
+        link = html.unescape(re.search(r'<textarea readonly rows="4">([^<]+)</textarea>', page.text).group(1))
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)
+        assert q["u"] == ["https://rwr.example.com"] and "p" not in q
+        # Client IP comes from X-Forwarded-For when the peer is the trusted proxy (rate limiting per real client).
+        c.cookies.clear()
+        token = csrf_of(c.get("/login").text)
+        c.post("/login", data={"username": "admin", "password": "wrong wrong wrong", "csrf": token},
+               headers={"X-Forwarded-For": "192.0.2.10"})
+        assert app.state.db.one("SELECT ip FROM audit WHERE action = 'login_failed'")["ip"] == "192.0.2.10"
+
+
 def test_expired_pairing_code(admin, app, client):
     code = pair_code(admin, app)
     app.state.db.execute("UPDATE pairing_codes SET expires = ?", (time.time() - 1,))
