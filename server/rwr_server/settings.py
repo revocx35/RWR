@@ -19,6 +19,10 @@ DEFAULTS: dict[str, Any] = {
     "detector_score": 0.6,          # YuNet confidence threshold
 }
 SECRET_KEYS = {"immich_api_key"}
+# Where the API key (and every snapshot/clip) is sent. Changing any of these requires entering the key again,
+# so a stolen phone token with "may change settings" can't redirect the stored key and the camera clips to
+# its own server.
+DESTINATION_KEYS = ("immich_url", "immich_ca_pem", "immich_allow_http")
 
 
 def load(db: DB) -> dict[str, Any]:
@@ -67,6 +71,10 @@ def apply_update(db: DB, changes: dict[str, Any]) -> dict[str, Any]:
                 raise SettingsError(f"{k} must be text")
             v = v.strip()
         new[k] = v
+    key_given = isinstance(changes.get("immich_api_key"), str) and changes["immich_api_key"] != ""
+    moved = any(new[k] != current[k] for k in DESTINATION_KEYS)
+    if moved and current["immich_api_key"] and not key_given:
+        raise SettingsError("Enter the Immich API key again to change the Immich address or certificate settings")
     _validate(new)
     db.set_setting("server", new)
     return new

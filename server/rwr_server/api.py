@@ -18,6 +18,8 @@ from .web import client_ip
 router = APIRouter(prefix="/api/v1")
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024
+# Per device: at most this many snapshot/clip uploads per hour (alerts have a cooldown, so real use is far lower).
+MAX_UPLOADS_PER_HOUR = 60
 
 
 def _err(status: int, msg: str) -> JSONResponse:
@@ -156,6 +158,10 @@ async def upload_media(request: Request):
     dev, err = _authenticate(request)
     if err:
         return _err(401, err)
+    db = request.app.state.db
+    if security.locked_for(db, f"upload:{dev['id']}"):
+        return _err(429, "too many uploads, try later")
+    security.record_failure(db, f"upload:{dev['id']}", MAX_UPLOADS_PER_HOUR, 3600, 3600)
     try:
         declared = int(request.headers.get("content-length", "0"))
     except ValueError:

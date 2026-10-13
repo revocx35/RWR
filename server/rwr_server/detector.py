@@ -66,8 +66,52 @@ class FaceResult:
         return d
 
 
+# Phone frames are at most 1280x720 today. The decoder allocates what the JPEG header claims, so a 631-byte file
+# claiming 30000x30000 pixels would take 5 GB: check the header first.
+MAX_FRAME_SIDE = 4096
+MAX_FRAME_PIXELS = 4096 * 3072
+
+
+def jpeg_size(data: bytes) -> tuple[int, int] | None:
+    """(width, height) from a JPEG's SOF header, or None if it isn't a well-formed JPEG header."""
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    i, n = 2, len(data)
+    while i + 4 <= n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xFF:  # fill byte
+            i += 1
+            continue
+        if marker in (0x01,) or 0xD0 <= marker <= 0xD7:  # markers without a length
+            i += 2
+            continue
+        seg_len = int.from_bytes(data[i + 2:i + 4], "big")
+        if seg_len < 2:
+            return None
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if i + 9 > n:
+                return None
+            height = int.from_bytes(data[i + 5:i + 7], "big")
+            width = int.from_bytes(data[i + 7:i + 9], "big")
+            return width, height
+        if marker == 0xDA:  # start of scan before any frame header
+            return None
+        i += 2 + seg_len
+    return None
+
+
+def frame_size_ok(jpeg: bytes) -> bool:
+    size = jpeg_size(jpeg)
+    return size is not None and 0 < size[0] <= MAX_FRAME_SIDE and 0 < size[1] <= MAX_FRAME_SIDE \
+        and size[0] * size[1] <= MAX_FRAME_PIXELS
+
+
 def decode_frame(jpeg: bytes, rotation_quarters: int, mirror: bool) -> np.ndarray | None:
     """Decodes a phone frame and makes it upright (clockwise rotation) and selfie-mirrored."""
+    if not frame_size_ok(jpeg):
+        return None
     img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return None

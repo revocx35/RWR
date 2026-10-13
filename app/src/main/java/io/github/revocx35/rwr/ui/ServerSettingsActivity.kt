@@ -113,7 +113,7 @@ class ServerSettingsActivity : ComponentActivity() {
                 label = { Text("Immich URL (https://…)") }, singleLine = true)
             OutlinedTextField(
                 immichKey, { immichKey = it.trim() }, Modifier.fillMaxWidth(),
-                label = { Text(if (keySet) "API key (saved, leave empty to keep)" else "API key") },
+                label = { Text(if (keySet) "API key (saved; leave empty to keep, re-enter to change the address)" else "API key") },
                 singleLine = true, visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             )

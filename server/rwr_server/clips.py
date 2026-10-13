@@ -68,11 +68,17 @@ def clip_fps(timestamps_ms: list[int]) -> int:
     return int(max(1, min(MAX_CLIP_FPS, round((len(timestamps_ms) - 1) / span)))) if span > 0 else 1
 
 
-def encode_mp4(frames: list[np.ndarray], timestamps_ms: list[int], tmp_dir: str | None = None) -> bytes:
-    """Encodes upright BGR frames to an H.264 MP4 (yuv420p, faststart) playable everywhere."""
-    if not frames:
+def encode_mp4(frames, timestamps_ms: list[int], tmp_dir: str | None = None) -> bytes:
+    """Encodes upright BGR frames to an H.264 MP4 (yuv420p, faststart) playable everywhere.
+
+    [frames] is a list of images or a callable frame(i) -> image. With a callable, frames are produced one at a
+    time as ffmpeg consumes them, so a 60 s clip never sits decoded in memory (that's gigabytes at 1280x720).
+    """
+    frame_at = frames if callable(frames) else frames.__getitem__
+    if not timestamps_ms:
         raise ValueError("no frames")
-    h, w = frames[0].shape[:2]
+    first = frame_at(0)
+    h, w = first.shape[:2]
     w2, h2 = w - w % 2, h - h % 2
     fps = clip_fps(timestamps_ms)
     order = resample(timestamps_ms, fps)
@@ -87,8 +93,11 @@ def encode_mp4(frames: list[np.ndarray], timestamps_ms: list[int], tmp_dir: str 
         ]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
+            cur_i, cur = 0, first  # [order] never goes backwards: keep only the current frame
             for i in order:
-                img = frames[i]
+                if i != cur_i:
+                    cur_i, cur = i, frame_at(i)
+                img = cur
                 if img.shape[1] != w2 or img.shape[0] != h2:
                     img = cv2.resize(img, (w2, h2))
                 proc.stdin.write(np.ascontiguousarray(img).tobytes())

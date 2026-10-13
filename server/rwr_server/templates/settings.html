@@ -12,6 +12,7 @@
   <label>Immich URL <input name="immich_url" value="{{ s.immich_url }}" placeholder="https://immich.example.lan" maxlength="300"></label>
   <label>API key <input name="immich_api_key" type="password" autocomplete="off" maxlength="512"
     placeholder="{{ 'saved – leave empty to keep it' if s.immich_api_key_set else 'paste the API key' }}"></label>
+  {% if s.immich_api_key_set %}<p class="muted small">To change the Immich address or certificate settings, enter the API key again (so nobody can send the saved key elsewhere).</p>{% endif %}
   {% if s.immich_api_key_set %}<label class="check"><input type="checkbox" name="remove_api_key"> Remove the saved API key</label>{% endif %}
   <label>Album (empty = no album) <input name="immich_album" value="{{ s.immich_album }}" maxlength="100"></label>
   <label class="check"><input type="checkbox" name="immich_allow_http" {{ "checked" if s.immich_allow_http }}> Allow plain HTTP (insecure: only for an Immich on your own LAN)</label>

@@ -13,7 +13,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.txt models.sha256 fetch_models.py ./
-RUN pip install -r requirements.txt \
+RUN pip install pip==26.2 \
+ && pip install -r requirements.txt \
  && pip install --no-deps mediapipe==1.0.1 \
  && python fetch_models.py /app/models
 

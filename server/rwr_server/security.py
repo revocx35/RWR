@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import time
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ COOKIE_NAME = "__Host-rwr_session"   # __Host-: Secure, Path=/, no Domain, so su
 # Login throttling: per client IP, and a global cap against distributed guessing.
 IP_MAX_FAILURES, IP_WINDOW_S, IP_LOCK_S = 5, 15 * 60, 15 * 60
 GLOBAL_MAX_FAILURES, GLOBAL_WINDOW_S, GLOBAL_LOCK_S = 20, 15 * 60, 5 * 60
+# Second factor: also capped globally, so a botnet that has the password can't spread code guesses over IPs.
+TOTP_GLOBAL_MAX_FAILURES = 10
 # Pairing / device-token endpoints.
 PAIR_MAX_FAILURES, PAIR_WINDOW_S, PAIR_LOCK_S = 10, 10 * 60, 10 * 60
 
@@ -57,6 +60,19 @@ def password_problem(pw: str, username: str = "") -> str | None:
     if len(set(pw)) < 5:
         return "Use more different characters."
     return None
+
+
+def throttle_key(ip: str) -> str:
+    """Per-client throttle key. IPv6 clients usually control a whole /64, so it counts as one client."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return f"ip:{ip}"
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return f"ip:{addr.ipv4_mapped}"
+        return "ip:" + str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return f"ip:{addr}"
 
 
 def new_token(nbytes: int = 32) -> str:

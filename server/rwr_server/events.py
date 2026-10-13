@@ -19,9 +19,10 @@ def media_name(at: float, kind: str) -> str:
 
 
 class EventStore:
-    def __init__(self, db: DB, events_dir: Path):
+    def __init__(self, db: DB, events_dir: Path, max_bytes: int = 4096 * 1024 * 1024):
         self.db = db
         self.dir = events_dir
+        self.max_bytes = max_bytes
         self.dir.mkdir(parents=True, exist_ok=True)
         # Uploads run off the event loop; one at a time per server keeps Immich load polite.
         self._uploader = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="immich")
@@ -42,6 +43,7 @@ class EventStore:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             self.db.execute("UPDATE events SET file = ? WHERE id = ?", (rel, event_id))
+            self._enforce_quota(keep=event_id)
         if immich_on:
             self._uploader.submit(self._upload, event_id, data, at, kind, s)
         elif want_immich:
@@ -80,6 +82,19 @@ class EventStore:
         if found:
             found[0].unlink(missing_ok=True)
         self.db.execute("DELETE FROM events WHERE id = ?", (event_id,))
+
+    def _enforce_quota(self, keep: int) -> None:
+        """Deletes the oldest saved events until the folder is under [max_bytes] (a flood of uploads from one
+        phone can't fill the disk)."""
+        rows = self.db.all("SELECT id, file FROM events WHERE file IS NOT NULL ORDER BY at ASC, id ASC")
+        sizes = {r["id"]: (self.dir / r["file"]).stat().st_size if (self.dir / r["file"]).exists() else 0 for r in rows}
+        total = sum(sizes.values())
+        for r in rows:
+            if total <= self.max_bytes:
+                break
+            if r["id"] != keep:
+                self.delete(r["id"])
+                total -= sizes[r["id"]]
 
     def purge(self) -> int:
         days = settings.load(self.db)["retention_days"]

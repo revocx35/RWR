@@ -32,6 +32,11 @@ class Config:
     # "off": serve plain HTTP for a TLS-terminating reverse proxy (e.g. Nginx Proxy Manager). Then set
     # RWR_PUBLIC_URL to the proxy's https:// address and RWR_TRUSTED_PROXIES to the proxy's IP.
     tls: bool = field(default_factory=lambda: os.environ.get("RWR_TLS", "on").lower() not in ("off", "0", "false", "no"))
+    # Optional: networks allowed to reach the admin web UI (e.g. "192.168.1.0/24,fd00::/8"). The phone API
+    # (/api/v1) stays reachable from everywhere. Empty = no restriction.
+    admin_networks: list[str] = field(default_factory=lambda: _list("RWR_ADMIN_NETWORKS"))
+    # Saved snapshots/clips are capped at this size; the oldest are removed first.
+    events_max_mb: int = field(default_factory=lambda: int(os.environ.get("RWR_EVENTS_MAX_MB", "4096")))
     detector_threads: int = field(default_factory=lambda: int(os.environ.get("RWR_DETECTOR_THREADS", "2")))
     max_devices_streaming: int = field(default_factory=lambda: int(os.environ.get("RWR_MAX_STREAMS", "8")))
 
@@ -48,10 +53,19 @@ class Config:
         return self.data_dir / "events"
 
     def is_trusted_proxy(self, host: str | None) -> bool:
-        if not host or not self.trusted_proxies:
-            return False
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            return False
-        return any(ip in ipaddress.ip_network(n, strict=False) for n in self.trusted_proxies)
+        return _in_networks(host, self.trusted_proxies)
+
+    def is_admin_client(self, host: str | None) -> bool:
+        return not self.admin_networks or _in_networks(host, self.admin_networks)
+
+
+def _in_networks(host: str | None, networks: list[str]) -> bool:
+    if not host or not networks:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return any(ip in ipaddress.ip_network(n, strict=False) for n in networks)

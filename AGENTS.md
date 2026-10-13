@@ -47,6 +47,11 @@ docker compose -p rwrtest up -d --build        # local instance; settings come f
   `fingerprint` are `None`, the healthcheck uses http, and startup warns about a missing https `RWR_PUBLIC_URL` or
   `RWR_TRUSTED_PROXIES`. Tested in `test_reverse_proxy_mode_pairs_without_pin`.
 - Recovery: `docker compose exec rwr python -m rwr_server.admin reset-password`.
+- Security regressions live in `tests/test_security.py` (body limits, parallel login, Immich destination,
+  JPEG bombs, lazy clip encoding, proxy redirect, admin networks, upload limits). `httpx.ASGITransport` +
+  `asyncio.gather` is how to test concurrency; TestClient is sequential. Starlette's `BaseHTTPMiddleware` wraps
+  exceptions in an `ExceptionGroup`, hence `except*` in `BodyLimit`.
+- Any new code that decodes images from the network must check `frame_size_ok()` first.
 - Published image: `ghcr.io/revocx35/rwr-server:<version>` + `latest`. On release: bump `RWR_VERSION`'s default in
   `docker-compose.yml`, `docker build -t ghcr.io/revocx35/rwr-server:X.Y.Z -t ...:latest .`, check that `/data` is empty
   in the image, `gh auth token | docker login ghcr.io -u revocx35 --password-stdin`, push, `docker logout ghcr.io`.

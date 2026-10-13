@@ -140,22 +140,33 @@ Assets: camera frames and clips of people behind the user, the admin account, de
 | Threat | Mitigation |
 |---|---|
 | Network attacker (LAN/Wi-Fi) reads or alters the stream | TLS only (the app blocks cleartext app-wide). The app pins the server's public key from the QR code, so a MITM certificate, even a CA-signed one, is refused. |
-| Someone guesses the admin password | argon2id; per-IP and global lockouts; generic errors with jittered delays; optional TOTP with replay protection; no default password (random, must be changed). |
+| Someone guesses the admin password | argon2id; per-IP (IPv6: per /64) and global lockouts; password and 2FA checks run one at a time (`app.state.auth_lock`), so parallel requests can't slip past the lockout; generic errors with jittered delays; optional TOTP with replay protection and its own global failure cap; the "current password" checks on the account page are throttled the same way; no default password (random, must be changed). Optional `RWR_ADMIN_NETWORKS` hides the whole web UI from other networks (404) while the phone API stays reachable. |
+| Memory exhaustion by anonymous requests | `BodyLimit` ASGI middleware: 256 KB per request body (81 MB for `/api/v1/media`), enforced while the body streams in, so chunked uploads without Content-Length are cut off too. |
 | Session theft / CSRF / clickjacking | `__Host-` cookie with Secure, HttpOnly, SameSite=Strict; idle and absolute expiry; rotation on login; CSRF token plus Origin check on every POST; `frame-ancestors 'none'` and `X-Frame-Options: DENY`; strict CSP with no inline script. |
 | XSS via device names or other stored text | Jinja autoescape everywhere; no JavaScript at all, and the CSP forbids inline scripts anyway. |
 | Stolen or copied device token | Stored hashed server-side and encrypted with the Keystore on the phone. Revocable in the web UI, which also drops the live stream. Unpair revokes it too. Bad tokens are throttled per IP. |
 | Leaked pairing QR | Single use, valid 10 minutes, 128-bit; shown only to the logged-in admin. |
-| Phone abuses the server | Frame size, rate and message caps; one stream per device; a global stream limit; settings clamped; config changes only with `can_configure`; media uploads type-checked and size-capped. |
-| Immich key exposure or misuse | Write-only in UI and API; never logged; sent only to the configured URL; redirects not followed; TLS verified (custom CA possible); plain HTTP only by explicit opt-in. |
+| Phone abuses the server (or a stolen token) | Frame size, rate and message caps; JPEG dimensions are read from the header before decoding (max 4096 px a side, 12.6 MP), because a 631-byte file can claim 30000×30000 and make the decoder allocate 5 GB; one stream per device; a global stream limit; clip data capped at 256 MB and encoded frame by frame; settings clamped; config changes only with `can_configure`; media uploads type-checked, size-capped and limited to 60 per hour per device; saved events capped at `RWR_EVENTS_MAX_MB` (oldest removed). |
+| Immich key exposure or misuse | Write-only in UI and API; never logged; sent only to the configured URL; changing the URL, CA or plain-HTTP option requires entering the key again (otherwise a phone with `can_configure` could point Immich at its own server and receive the key and every clip); redirects not followed; TLS verified (custom CA possible); plain HTTP only by explicit opt-in. |
 | Container compromise impact | Non-root (uid 10001), read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, pids and memory limits; only `/data` is writable. |
 | Self-signed certificate in the browser | The first visit shows a warning; check the SHA-256 fingerprint printed in the log and on the dashboard, or bring your own certificate. `Referrer-Policy: same-origin`, because `no-referrer` makes browsers send `Origin: null` and breaks the CSRF check. |
 
 Reverse-proxy mode (`RWR_TLS=off`): TLS is terminated by the proxy. The proxy's certificate changes on
 renewal, so pairing codes carry no pin (`RWR_PAIRING_PIN=none`) and the app validates it against the phone's
 trusted CAs. That needs a publicly trusted certificate, e.g. Let's Encrypt. Client IPs come from
-`X-Forwarded-For`, but only when the peer is in `RWR_TRUSTED_PROXIES`. The hop between proxy and server is
+`X-Forwarded-For`, but only when the peer is in `RWR_TRUSTED_PROXIES`. Requests the proxy marks
+`X-Forwarded-Proto: http` are redirected (308) to the https address, so a login form is never served over plain
+HTTP even if the proxy doesn't force SSL. The hop between proxy and server is
 plaintext, so firewall the port to the proxy only. A proxy can also forward to `https://` with the self-signed
 backend certificate, which keeps that hop encrypted.
+
+Security review (2026-10, v1.2.1): confirmed and fixed by attacking a test instance: unbounded anonymous request
+bodies (1.5 GB buffered from one request), the parallel-login lockout bypass (60 guesses checked instead of 5),
+Immich key and clip redirection by a phone token, the JPEG decompression bomb, whole clips decoded into memory,
+login served over plain HTTP behind the proxy. Regression tests: `server/tests/test_security.py`. Checked without
+findings: path traversal (static files, event media), XSS via device names, error-message leaks, security
+headers, TLS versions on the proxy (1.2/1.3 only), docs/OpenAPI disabled, token-in-query, dependency CVEs (pip-audit,
+trivy: only pip itself, upgraded).
 
 Known limits:
 - No per-user accounts (single admin).

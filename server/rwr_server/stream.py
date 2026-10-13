@@ -18,11 +18,12 @@ import time
 from dataclasses import dataclass, field
 
 import cv2
+import numpy as np
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from . import settings as server_settings
 from .clips import Frame, FrameBuffer, encode_mp4
-from .detector import DetectSettings, Detector, FaceResult, annotate, decode_frame
+from .detector import DetectSettings, Detector, FaceResult, annotate, decode_frame, frame_size_ok
 from .events import EventStore
 from .policy import AlertGate, OwnerTracker
 
@@ -33,6 +34,7 @@ MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_TEXT_BYTES = 16 * 1024
 MAX_FPS = 40                       # frames above this rate are dropped
 MAX_CLIP_SIDE_S = 30
+MAX_CLIP_BYTES = 256 * 1024 * 1024   # JPEG data collected for one clip; the clip ends early beyond this
 
 
 @dataclass
@@ -79,6 +81,7 @@ class _Clip:
     end_ts: int
     frames: list[Frame]
     onlookers: int
+    bytes: int = 0
 
 
 @dataclass
@@ -193,6 +196,9 @@ class StreamHub:
         if version != 1:
             await s.ws.close(code=1003, reason="unsupported frame version")
             return
+        if not frame_size_ok(memoryview(data)[HEADER.size:HEADER.size + 64 * 1024].tobytes()):
+            await s.ws.close(code=1003, reason="frame is not a JPEG of a supported size")
+            return
         now = time.time()
         if now - s.last_frame_at < 1.0 / MAX_FPS:
             return  # too fast: drop
@@ -202,7 +208,8 @@ class StreamHub:
         s.buffer.add(frame)
         if s.clip:
             s.clip.frames.append(frame)
-            if ts >= s.clip.end_ts:
+            s.clip.bytes += len(frame.jpeg)
+            if ts >= s.clip.end_ts or s.clip.bytes > MAX_CLIP_BYTES:
                 self._finish_clip(s)
         if s.busy:
             s.pending = frame  # analyse the newest frame next; older pending ones are skipped
@@ -295,21 +302,30 @@ class StreamHub:
 
     def _encode_and_record(self, device_id: int, clip: _Clip, boxes: dict[int, list[FaceResult]], cs) -> None:
         try:
-            imgs, stamps, last_boxes, last_box_ts = [], [], [], -10**12
-            for f in sorted(clip.frames, key=lambda f: f.ts_ms):
-                img = decode_frame(f.jpeg, f.rotation, f.mirror)
-                if img is None:
-                    continue
+            frames = sorted((f for f in clip.frames if frame_size_ok(f.jpeg)), key=lambda f: f.ts_ms)
+            # Boxes to draw on each frame: the last detection, kept visible between analysed frames.
+            drawn, last_boxes, last_box_ts = [], [], -10**12
+            for f in frames:
                 if f.seq in boxes:
                     last_boxes, last_box_ts = boxes[f.seq], f.ts_ms
-                if last_boxes and f.ts_ms - last_box_ts < 700:  # keep boxes visible between analysed frames
-                    img = annotate(img, last_boxes)
-                imgs.append(img)
-                stamps.append(f.ts_ms)
-            mp4 = encode_mp4(imgs, stamps, self.tmp_dir)
+                drawn.append(last_boxes if last_boxes and f.ts_ms - last_box_ts < 700 else [])
+            previous = None
+
+            def frame(i: int):
+                nonlocal previous
+                f = frames[i]
+                img = decode_frame(f.jpeg, f.rotation, f.mirror)
+                if img is None:  # undecodable: repeat the previous frame
+                    img = previous if previous is not None else np.zeros((480, 640, 3), np.uint8)
+                previous = img
+                return annotate(img, drawn[i]) if drawn[i] else img
+
+            if not frames:
+                return
+            mp4 = encode_mp4(frame, [f.ts_ms for f in frames], self.tmp_dir)
             self.events.record(device_id=device_id, at=clip.alert_ts / 1000, kind="video", data=mp4,
                                onlookers=clip.onlookers, mode=cs.mode, source="server", want_immich=cs.save_immich)
-            log.info("device %s: clip of %d frames recorded", device_id, len(imgs))
+            log.info("device %s: clip of %d frames recorded", device_id, len(frames))
         except Exception:
             log.exception("clip encoding failed for device %s", device_id)
 

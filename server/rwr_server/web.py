@@ -46,6 +46,23 @@ def client_ip(request: Request) -> str:
     return peer
 
 
+def _auth_failure(db, ip: str, action: str, detail: str = "", totp: bool = False) -> None:
+    """Counts a failed password or 2FA check against the client and against the global budget."""
+    security.record_failure(db, security.throttle_key(ip), security.IP_MAX_FAILURES, security.IP_WINDOW_S,
+                            security.IP_LOCK_S)
+    if totp:
+        security.record_failure(db, "totp", security.TOTP_GLOBAL_MAX_FAILURES, security.GLOBAL_WINDOW_S,
+                                security.GLOBAL_LOCK_S)
+    else:
+        security.record_failure(db, "user", security.GLOBAL_MAX_FAILURES, security.GLOBAL_WINDOW_S,
+                                security.GLOBAL_LOCK_S)
+    db.audit(ip, action, detail)
+
+
+def _locked(db, ip: str, totp: bool = False) -> float:
+    return max(security.locked_for(db, security.throttle_key(ip)), security.locked_for(db, "totp" if totp else "user"))
+
+
 def _render(request: Request, name: str, ctx: dict | None = None, status: int = 200) -> Response:
     ctx = dict(ctx or {})
     ctx.setdefault("flash", FLASH.get(request.query_params.get("msg", "")))
@@ -141,21 +158,21 @@ async def login(request: Request):
     pre = request.cookies.get(PRE_COOKIE, "")
     if not pre or not security.same(str(form.get("csrf", "")), pre) or not _same_origin(request):
         return _login_form(request, "Your session expired. Please try again.", 400)
-    wait = max(security.locked_for(db, f"ip:{ip}"), security.locked_for(db, "user"))
-    if wait:
-        db.audit(ip, "login_locked")
-        return _login_form(request, f"Too many attempts. Try again in {int(wait // 60) + 1} min.", 429)
-
     username = str(form.get("username", ""))[:100]
     password = str(form.get("password", ""))[:256]
-    admin = _admin_row(request)
-    # Always verify (against a dummy hash if needed) so timing doesn't reveal the username.
-    pw_ok = await asyncio.to_thread(security.verify_password, admin["password_hash"] if admin else None, password)
-    if not (admin and pw_ok and security.same(username, admin["username"])):
-        security.record_failure(db, f"ip:{ip}", security.IP_MAX_FAILURES, security.IP_WINDOW_S, security.IP_LOCK_S)
-        security.record_failure(db, "user", security.GLOBAL_MAX_FAILURES, security.GLOBAL_WINDOW_S,
-                                security.GLOBAL_LOCK_S)
-        db.audit(ip, "login_failed", username[:40])
+    ip_key = security.throttle_key(ip)
+    async with request.app.state.auth_lock:  # lockout check, password check and failure count happen as one step
+        wait = max(security.locked_for(db, ip_key), security.locked_for(db, "user"))
+        if wait:
+            db.audit(ip, "login_locked")
+            return _login_form(request, f"Too many attempts. Try again in {int(wait // 60) + 1} min.", 429)
+        admin = _admin_row(request)
+        # Always verify (against a dummy hash if needed) so timing doesn't reveal the username.
+        pw_ok = await asyncio.to_thread(security.verify_password, admin["password_hash"] if admin else None, password)
+        ok = bool(admin and pw_ok and security.same(username, admin["username"]))
+        if not ok:
+            _auth_failure(db, ip, "login_failed", username[:40])
+    if not ok:
         await asyncio.sleep(0.5 + secrets.randbelow(500) / 1000)
         return _login_form(request, "Wrong username or password.", 401)
 
@@ -164,7 +181,7 @@ async def login(request: Request):
     stage = "totp" if admin["totp_enabled"] else "full"
     raw, _ = security.create_session(db, stage, ip, request.headers.get("user-agent"))
     if stage == "full":
-        security.clear_failures(db, f"ip:{ip}")
+        security.clear_failures(db, ip_key)
         db.audit(ip, "login_ok")
     resp = RedirectResponse("/login/totp" if stage == "totp" else "/", status_code=303)
     _set_session_cookie(resp, raw)
@@ -192,20 +209,22 @@ async def totp_submit(request: Request):
     form = await request.form()
     if not _same_origin(request) or not security.same(str(form.get("csrf", "")), s.csrf):
         raise Redirect("/login")
-    if security.locked_for(db, f"ip:{ip}"):
-        security.delete_session(db, s.id_hash)
-        raise Redirect("/login")
-    admin = _admin_row(request)
-    step = _verify_totp(admin["totp_secret"], str(form.get("code", "")), admin["totp_last_step"])
+    async with request.app.state.auth_lock:
+        if _locked(db, ip, totp=True):
+            security.delete_session(db, s.id_hash)
+            raise Redirect("/login")
+        admin = _admin_row(request)
+        step = _verify_totp(admin["totp_secret"], str(form.get("code", "")), admin["totp_last_step"])
+        if step is None:
+            _auth_failure(db, ip, "totp_failed", totp=True)
+        else:
+            db.execute("UPDATE admin SET totp_last_step = ? WHERE id = 1", (step,))
     if step is None:
-        security.record_failure(db, f"ip:{ip}", security.IP_MAX_FAILURES, security.IP_WINDOW_S, security.IP_LOCK_S)
-        db.audit(ip, "totp_failed")
         await asyncio.sleep(0.5)
         return _render(request, "totp.html", {"csrf": s.csrf, "error": "Wrong code.", "public": True}, 401)
-    db.execute("UPDATE admin SET totp_last_step = ? WHERE id = 1", (step,))
     security.delete_session(db, s.id_hash)  # rotate: the half-authenticated session id is never upgraded
     raw, _ = security.create_session(db, "full", ip, request.headers.get("user-agent"))
-    security.clear_failures(db, f"ip:{ip}")
+    security.clear_failures(db, security.throttle_key(ip))
     db.audit(ip, "login_ok", "with 2FA")
     resp = RedirectResponse("/", status_code=303)
     _set_session_cookie(resp, raw)
@@ -428,8 +447,14 @@ async def change_password(request: Request):
             "username": admin["username"], "min_len": security.MIN_PASSWORD_LEN, "error": msg,
         }, status)
 
-    if not await asyncio.to_thread(security.verify_password, admin["password_hash"], current):
-        db.audit(client_ip(request), "password_change_failed")
+    ip = client_ip(request)
+    async with request.app.state.auth_lock:
+        if _locked(db, ip):
+            return fail("Too many attempts. Try again later.", 429)
+        ok = await asyncio.to_thread(security.verify_password, admin["password_hash"], current)
+        if not ok:
+            _auth_failure(db, ip, "password_change_failed")
+    if not ok:
         return fail("Current password is wrong.", 401)
     if new != confirm:
         return fail("The new passwords don't match.")
@@ -489,10 +514,16 @@ async def totp_disable(request: Request):
     s, form = await _admin_form(request)
     db = _db(request)
     admin = _admin_row(request)
-    ok_pw = await asyncio.to_thread(security.verify_password, admin["password_hash"], str(form.get("current", "")))
-    step = _verify_totp(admin["totp_secret"], str(form.get("code", "")), admin["totp_last_step"])
+    ip = client_ip(request)
+    async with request.app.state.auth_lock:
+        if _locked(db, ip) or _locked(db, ip, totp=True):
+            ok_pw, step = False, None
+        else:
+            ok_pw = await asyncio.to_thread(security.verify_password, admin["password_hash"], str(form.get("current", "")))
+            step = _verify_totp(admin["totp_secret"], str(form.get("code", "")), admin["totp_last_step"])
+            if not ok_pw or step is None:
+                _auth_failure(db, ip, "totp_disable_failed", totp=ok_pw)
     if not ok_pw or step is None:
-        db.audit(client_ip(request), "totp_disable_failed")
         return _render(request, "account.html", {
             "csrf": s.csrf, "must_change": False, "totp_enabled": True, "username": admin["username"],
             "min_len": security.MIN_PASSWORD_LEN, "error": "Password or code is wrong.",
