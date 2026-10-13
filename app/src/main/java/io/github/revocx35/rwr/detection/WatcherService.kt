@@ -20,6 +20,7 @@ import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.service.quicksettings.TileService
 import android.util.Log
 import android.util.Range
@@ -54,11 +55,17 @@ import io.github.revocx35.rwr.server.ServerApi
 import io.github.revocx35.rwr.server.StreamClient
 import io.github.revocx35.rwr.tile.WatchTileService
 import io.github.revocx35.rwr.ui.MainActivity
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.abs
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -126,6 +133,12 @@ class WatcherService : LifecycleService() {
         account = ServerAccount.load(this)
         updateRingLength()
         prefs.register(prefListener)
+        // The debug view opened or closed: tell the server whether to send its per-frame decisions.
+        lifecycleScope.launch {
+            DebugFeed.viewerCount.map { it > 0 }.distinctUntilChanged().drop(1).collect {
+                stream?.updateSettings(streamSettings())
+            }
+        }
         ContextCompat.registerReceiver(
             this, screenReceiver,
             IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) },
@@ -323,14 +336,16 @@ class WatcherService : LifecycleService() {
 
     /** Runs on [analysisExecutor]. */
     private fun process(upright: Bitmap, now: Long, seq: Int?) {
+        val started = SystemClock.elapsedRealtime()
         val faces = runCatching { finder?.find(upright) }
             .onFailure { Log.w(TAG, "face detection failed", it) }
             .getOrNull() ?: return
         val ownerFace = if (prefs.ignoreOwner) owner.pick(faces, now) else null
-        val onlookers = when (prefs.detectionMode) {
-            DetectionMode.HEAD -> OnlookerPolicy.onlookers(faces, ownerFace, prefs.maxHeadAngle)
-                .filter { face -> verify(upright, face) { true } }
-            DetectionMode.EYE -> eyeOnlookers(upright, faces, ownerFace)
+        val verdicts = faces.map { if (it === ownerFace) FaceVerdict(it, FaceRole.OWNER) else judge(upright, it) }
+        val onlookers = verdicts.filter { it.role == FaceRole.ONLOOKER }.map { it.face }
+        if (DebugFeed.active) {
+            DebugFeed.publish(DebugFeed.Frame(upright, verdicts, DebugFeed.Source.PHONE, prefs.detectionMode,
+                SystemClock.elapsedRealtime() - started, now))
         }
         if (BuildConfig.DEBUG && faces.isNotEmpty()) {
             Log.d(TAG, "frame ${upright.width}x${upright.height}: faces=$faces onlookers=${onlookers.size}")
@@ -348,43 +363,33 @@ class WatcherService : LifecycleService() {
         .getOrNull()?.also { eyeTracker = it }
 
     /**
-     * Runs Face Landmarker on [face] and passes the gaze to [decide]; drops ML Kit false detections where the
-     * landmarker finds no face (see [OnlookerPolicy.isVerified]). Head mode only gets here for faces that
-     * would alert, so the landmarker stays idle while only the owner is in view.
+     * Decides one non-owner face. Face Landmarker runs only where it matters: in head mode only on faces that
+     * would alert (so it stays idle while only the owner is in view), in eye mode on faces turned roughly toward
+     * the camera. A detection where it finds no face is dropped (see [OnlookerPolicy.isVerified]).
      */
-    private inline fun verify(upright: Bitmap, face: FaceBox, decide: (Gaze?) -> Boolean): Boolean {
-        val tracker = landmarker() ?: return decide(null)
-        val gaze = runCatching { tracker.gaze(upright, face) }.getOrNull()
-        if (!OnlookerPolicy.isVerified(face, gaze != null)) {
-            if (BuildConfig.DEBUG) Log.d(TAG, "dropped ${face.width}px face at ${face.left},${face.top}: no landmarks")
-            return false
-        }
-        return decide(gaze)
-    }
-
-    /** Eye mode: iris gaze for each non-owner face that is turned roughly toward the camera. */
-    private fun eyeOnlookers(upright: Bitmap, faces: List<FaceBox>, ownerFace: FaceBox?): List<FaceBox> {
+    private fun judge(upright: Bitmap, face: FaceBox): FaceVerdict {
+        val eye = prefs.detectionMode == DetectionMode.EYE
         val maxHead = prefs.maxHeadAngle
-        val maxGaze = prefs.maxGazeAngle
+        if (!eye && !OnlookerPolicy.isLookingAtCamera(face, maxHead)) return FaceVerdict(face, FaceRole.NOT_LOOKING)
         val limit = OnlookerPolicy.EYE_PREFILTER_ANGLE
-        return OnlookerPolicy.candidates(faces, ownerFace)
-            .filter { kotlin.math.abs(it.yaw) <= limit && kotlin.math.abs(it.pitch) <= limit }
-            .mapNotNull { face ->
-                var result: FaceBox? = null
-                verify(upright, face) { gaze ->
-                    if (BuildConfig.DEBUG && gaze != null) {
-                        Log.d(TAG, "gaze %d,%d: head %.1f/%.1f eyes %.1f/%.1f -> %.1f/%.1f open=%b".format(
-                            face.left, face.top, gaze.headYaw, gaze.headPitch, gaze.eyeYaw, gaze.eyePitch,
-                            gaze.yaw, gaze.pitch, gaze.eyesOpen))
-                    }
-                    OnlookerPolicy.isLookingEyeMode(face, gaze, maxHead, maxGaze).also { looking ->
-                        if (looking) result = if (gaze != null && face.width >= OnlookerPolicy.MIN_EYE_FACE_PX) {
-                            face.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
-                        } else face
-                    }
-                }
-                result
-            }
+        if (eye && (abs(face.yaw) > limit || abs(face.pitch) > limit)) return FaceVerdict(face, FaceRole.TURNED_AWAY)
+        val tracker = landmarker()
+        val gaze = tracker?.let { t -> runCatching { t.gaze(upright, face) }.getOrNull() }
+        if (tracker != null && !OnlookerPolicy.isVerified(face, gaze != null)) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "dropped ${face.width}px face at ${face.left},${face.top}: no landmarks")
+            return FaceVerdict(face, FaceRole.NO_FACE)
+        }
+        val drawn = if (gaze != null && face.width >= OnlookerPolicy.MIN_EYE_FACE_PX) {
+            face.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
+        } else face
+        if (!eye) return FaceVerdict(drawn, FaceRole.ONLOOKER, gaze)
+        if (BuildConfig.DEBUG && gaze != null) {
+            Log.d(TAG, "gaze %d,%d: head %.1f/%.1f eyes %.1f/%.1f -> %.1f/%.1f open=%b".format(
+                face.left, face.top, gaze.headYaw, gaze.headPitch, gaze.eyeYaw, gaze.eyePitch,
+                gaze.yaw, gaze.pitch, gaze.eyesOpen))
+        }
+        val looking = OnlookerPolicy.isLookingEyeMode(face, gaze, maxHead, prefs.maxGazeAngle)
+        return FaceVerdict(drawn, if (looking) FaceRole.ONLOOKER else FaceRole.NOT_LOOKING, gaze)
     }
 
     private fun rememberBoxes(seq: Int, onlookers: List<FaceBox>) {
@@ -397,6 +402,7 @@ class WatcherService : LifecycleService() {
      * [serverDetected]: the server found the onlooker and saves to Immich itself, so the phone never uploads.
      */
     private fun raiseAlert(upright: Bitmap, onlookers: List<FaceBox>, ts: Long, serverDetected: Boolean) {
+        DebugFeed.alerted(ts)
         val snapshot = annotate(upright, onlookers)
         val saveTo = prefs.saveTo
         val acct = account
@@ -411,7 +417,7 @@ class WatcherService : LifecycleService() {
         if (prefs.mediaType == MediaType.PHOTO) {
             val uri = if (saveTo.gallery) SnapshotStore.save(this, snapshot, ts) else null
             if (upload) mediaExecutor.execute { uploadPhoto(acct!!, snapshot, ts, onlookers.size, mode) }
-            onMain { presenter.show(snapshot, uri, onlookers.size, ts, clipPending = false, note = note) }
+            onMain { presenter.show(snapshot, uri, onlookers.size, ts, clipPending = false, note = note, overlay = !DebugFeed.active) }
             return
         }
         val recordHere = saveTo.gallery || upload
@@ -421,7 +427,7 @@ class WatcherService : LifecycleService() {
             clip = job
             if (prefs.postSec == 0) finishClip(job)
         }
-        onMain { presenter.show(snapshot, null, onlookers.size, ts, clipPending = recordHere, note = note) }
+        onMain { presenter.show(snapshot, null, onlookers.size, ts, clipPending = recordHere, note = note, overlay = !DebugFeed.active) }
     }
 
     /** Runs on [analysisExecutor]: hands the collected frames to [mediaExecutor] for encoding. */
@@ -486,6 +492,7 @@ class WatcherService : LifecycleService() {
         .put("pre_sec", prefs.preSec)
         .put("post_sec", prefs.postSec)
         .put("save_immich", prefs.saveTo.immich)
+        .put("debug", DebugFeed.active)
 
     private fun startStreamIfNeeded() {
         val acct = account
@@ -522,6 +529,35 @@ class WatcherService : LifecycleService() {
         override fun onAlert(alert: JSONObject) {
             analysisExecutor.execute { handleServerAlert(alert) }
         }
+
+        override fun onDebug(msg: JSONObject) {
+            if (DebugFeed.active) analysisExecutor.execute { handleServerDebug(msg) }
+        }
+    }
+
+    private var lastServerDebugAt = 0L
+
+    /** Runs on [analysisExecutor]: the server's per-frame decisions, shown in the debug view (~6 per second). */
+    private fun handleServerDebug(msg: JSONObject) {
+        val now = SystemClock.elapsedRealtime()
+        if (!DebugFeed.active || now - lastServerDebugAt < SERVER_DEBUG_INTERVAL_MS) return
+        val frame = ring.bySeq(msg.optInt("seq")) ?: return
+        lastServerDebugAt = now
+        val upright = FrameCodec.uprightMirrored(frame) ?: return
+        val arr = msg.optJSONArray("faces")
+        val verdicts = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
+            val f = arr!!.optJSONObject(i) ?: return@mapNotNull null
+            val box = parseFace(f) ?: return@mapNotNull null
+            val role = FaceRole.fromWire(f.optString("role")) ?: return@mapNotNull null
+            val gaze = f.optJSONArray("gaze")?.takeIf { it.length() == 2 }?.let {
+                val gy = it.getDouble(0).toFloat()
+                val gp = it.getDouble(1).toFloat()
+                Gaze(box.yaw, box.pitch, gy - box.yaw, gp - box.pitch, f.optBoolean("eyes_open", true), emptyList())
+            }
+            FaceVerdict(box, role, gaze)
+        }
+        val mode = if (msg.optString("mode") == "eye") DetectionMode.EYE else DetectionMode.HEAD
+        DebugFeed.publish(DebugFeed.Frame(upright, verdicts, DebugFeed.Source.SERVER, mode, msg.optLong("ms"), frame.tsMs))
     }
 
     /** Runs on [analysisExecutor]. The server's boxes are in the same upright, mirrored frame space as ours. */
@@ -538,20 +574,21 @@ class WatcherService : LifecycleService() {
 
     private fun parseFaces(alert: JSONObject): List<FaceBox> {
         val arr = alert.optJSONArray("faces") ?: return emptyList()
-        return (0 until arr.length()).mapNotNull { i ->
-            val f = arr.optJSONObject(i) ?: return@mapNotNull null
-            val b = f.optJSONArray("box") ?: return@mapNotNull null
-            if (b.length() != 4) return@mapNotNull null
-            val rays = f.optJSONArray("rays")?.let { r ->
-                (0 until r.length()).mapNotNull { j ->
-                    r.optJSONArray(j)?.takeIf { it.length() == 4 }?.let {
-                        Ray(it.getDouble(0).toFloat(), it.getDouble(1).toFloat(), it.getDouble(2).toFloat(), it.getDouble(3).toFloat())
-                    }
+        return (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let(::parseFace) }
+    }
+
+    private fun parseFace(f: JSONObject): FaceBox? {
+        val b = f.optJSONArray("box") ?: return null
+        if (b.length() != 4) return null
+        val rays = f.optJSONArray("rays")?.let { r ->
+            (0 until r.length()).mapNotNull { j ->
+                r.optJSONArray(j)?.takeIf { it.length() == 4 }?.let {
+                    Ray(it.getDouble(0).toFloat(), it.getDouble(1).toFloat(), it.getDouble(2).toFloat(), it.getDouble(3).toFloat())
                 }
-            }.orEmpty()
-            FaceBox(b.getInt(0), b.getInt(1), b.getInt(2), b.getInt(3),
-                f.optDouble("yaw", 0.0).toFloat(), f.optDouble("pitch", 0.0).toFloat(), rays)
-        }
+            }
+        }.orEmpty()
+        return FaceBox(b.getInt(0), b.getInt(1), b.getInt(2), b.getInt(3),
+            f.optDouble("yaw", 0.0).toFloat(), f.optDouble("pitch", 0.0).toFloat(), rays)
     }
 
     // ------------------------------------------------------------------ drawing & helpers
@@ -653,6 +690,7 @@ class WatcherService : LifecycleService() {
         private const val FRAME_INTERVAL_MS = 330L
         /** Frames kept even in photo mode, so a server alert can find the frame it refers to. */
         private const val RING_MIN_SECONDS = 4
+        private const val SERVER_DEBUG_INTERVAL_MS = 150L
         const val ACTION_STOP = "io.github.revocx35.rwr.STOP"
         const val ACTION_RELOAD_SERVER = "io.github.revocx35.rwr.RELOAD_SERVER"
         const val ACTION_DEBUG_INJECT = "io.github.revocx35.rwr.DEBUG_INJECT"

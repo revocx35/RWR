@@ -48,6 +48,8 @@ class FaceResult:
     gaze: gz.Gaze | None = None
     looking: bool = False
     owner: bool = False
+    # False: Face Landmarker found no face (or another face) at this detection; never an onlooker.
+    verified: bool = True
     rays: list[tuple[float, float, float, float]] = field(default_factory=list)
 
     @property
@@ -59,6 +61,7 @@ class FaceResult:
         d = {"box": list(self.box), "yaw": round(self.yaw, 1), "pitch": round(self.pitch, 1)}
         if self.gaze:
             d["gaze"] = [round(self.gaze.yaw, 1), round(self.gaze.pitch, 1)]
+            d["eyes_open"] = bool(self.gaze.eyes_open)
             d["rays"] = [[round(v, 1) for v in r] for r in self.rays]
         return d
 
@@ -99,8 +102,9 @@ class Detector:
         return loc.yunet, loc.landmarker
 
     def analyze(self, img: np.ndarray, s: DetectSettings) -> list[FaceResult]:
-        """All faces in [img] with pose, gaze and the looking decision. Picking the owner is up to the caller
-        (it needs the previous frames, see policy.OwnerTracker)."""
+        """All detections in [img] with pose, gaze and the looking decision; false detections come back with
+        verified=False (for the debug view). Picking the owner is up to the caller (it needs the previous frames,
+        see policy.OwnerTracker)."""
         yunet, landmarker = self._models()
         h, w = img.shape[:2]
         yunet.setInputSize((w, h))
@@ -111,18 +115,21 @@ class Detector:
             box = (int(max(0, x)), int(max(0, y)), int(min(w, x + bw)), int(min(h, y + bh)))
             yaw, pitch = _pose_from_five_points(row[4:14].reshape(5, 2))
             faces.append((row, FaceResult(box=box, score=float(row[14]), yaw=yaw, pitch=pitch)))
-        verified: list[FaceResult] = []
+        verified: list[FaceResult] = []  # all detections, each marked verified or not
         for _, f in faces:
             face_w = f.box[2] - f.box[0]
             pts = self._landmarks(img, f.box, landmarker)
             if pts is None and face_w >= MIN_EYE_FACE_PX:
-                continue  # big enough for the landmarker, yet no face there: a false detection
+                f.verified = False  # big enough for the landmarker, yet no face there: a false detection
+                verified.append(f)
+                continue
             if pts is not None:
                 f.yaw, f.pitch = gz.head_pose(pts)
                 f.gaze = gz.estimate(pts)
+            if f.gaze is not None and face_w >= MIN_EYE_FACE_PX:
+                f.rays = gz.laser_rays(f.gaze, face_w * 0.8)
             if s.mode == "eye" and f.gaze is not None and face_w >= MIN_EYE_FACE_PX:
                 f.looking = gz.is_looking(f.gaze, s.max_gaze_angle)
-                f.rays = gz.laser_rays(f.gaze, face_w * 0.8)
             else:
                 f.looking = abs(f.yaw) <= s.max_head_angle and abs(f.pitch) <= s.max_head_angle
             verified.append(f)

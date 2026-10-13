@@ -21,6 +21,26 @@ data class FaceBox(
 
 enum class DetectionMode { HEAD, EYE }
 
+/** Why a face did or didn't count, for the debug view. Same names as the server's debug messages. */
+enum class FaceRole(val wire: String, val label: String) {
+    OWNER("owner", "you"),
+    ONLOOKER("onlooker", "LOOKING"),
+    NOT_LOOKING("not_looking", "not looking"),
+    /** Eye mode: head turned past the prefilter angle, so the eyes weren't checked. */
+    TURNED_AWAY("turned_away", "turned away"),
+    /** Face Landmarker found no face (or another face) there: a false detection. */
+    NO_FACE("no_face", "not a face"),
+    /** Server: narrower than its minimum face size. */
+    TOO_SMALL("too_small", "too small");
+
+    companion object {
+        fun fromWire(s: String): FaceRole? = entries.firstOrNull { it.wire == s }
+    }
+}
+
+/** One face and the decision about it; [gaze] is set when Face Landmarker ran on it. */
+data class FaceVerdict(val face: FaceBox, val role: FaceRole, val gaze: Gaze? = null)
+
 /**
  * Decides which faces in a frame count as onlookers. Pure Kotlin so it is unit-tested on the JVM.
  *

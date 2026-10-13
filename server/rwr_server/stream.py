@@ -46,6 +46,7 @@ class ClientSettings:
     pre_sec: int = 10
     post_sec: int = 10
     save_immich: bool = False
+    debug: bool = False            # send per-frame decisions for the app's debug view
 
     @staticmethod
     def parse(d: dict) -> "ClientSettings":
@@ -61,7 +62,7 @@ class ClientSettings:
             c.mode = d["mode"]
         if d.get("media") in ("photo", "video"):
             c.media = d["media"]
-        for key in ("ignore_owner", "save_immich"):
+        for key in ("ignore_owner", "save_immich", "debug"):
             if isinstance(d.get(key), bool):
                 setattr(c, key, d[key])
         num("max_head_angle", 5, 60, float)
@@ -89,6 +90,7 @@ class DeviceStream:
     buffer: FrameBuffer = field(default_factory=lambda: FrameBuffer(12))
     gate: AlertGate = field(default_factory=AlertGate)
     owner: OwnerTracker = field(default_factory=OwnerTracker)
+    debug_msg: dict | None = None
     busy: bool = False
     pending: Frame | None = None
     clip: _Clip | None = None
@@ -98,6 +100,17 @@ class DeviceStream:
     last_frame_at: float = 0.0
     started: float = field(default_factory=time.time)
     closed: bool = False
+
+
+def _role(f: FaceResult, min_face_px: int) -> str:
+    """Why a face did or didn't count; same names as FaceRole in the app."""
+    if not f.verified:
+        return "no_face"
+    if f.owner:
+        return "owner"
+    if f.box[2] - f.box[0] < min_face_px:
+        return "too_small"
+    return "onlooker" if f.looking else "not_looking"
 
 
 class StreamHub:
@@ -216,10 +229,12 @@ class StreamHub:
 
     def _analyse(self, s: DeviceStream, frame: Frame, det: DetectSettings, min_face_px: int):
         """Runs in the detector pool; frames of one stream are analysed one at a time (see _analyse_loop)."""
+        started = time.perf_counter()
         img = decode_frame(frame.jpeg, frame.rotation, frame.mirror)
         if img is None:
             return None
-        faces = self.detector.analyze(img, det)
+        detections = self.detector.analyze(img, det)
+        faces = [f for f in detections if f.verified]
         for f in faces:
             f.owner = False
         if s.settings.ignore_owner:
@@ -227,9 +242,17 @@ class StreamHub:
             if i is not None:
                 faces[i].owner = True
         onlookers = [f for f in faces if f.looking and not f.owner and f.box[2] - f.box[0] >= min_face_px]
+        if s.settings.debug:
+            s.debug_msg = {
+                "type": "debug", "seq": frame.seq, "mode": det.mode, "ms": round((time.perf_counter() - started) * 1000),
+                "faces": [dict(f.to_json(), role=_role(f, min_face_px)) for f in detections],
+            }
         return img, faces, onlookers
 
     async def _after_analysis(self, s: DeviceStream, frame: Frame, img, faces, onlookers) -> None:
+        if s.debug_msg is not None:
+            msg, s.debug_msg = s.debug_msg, None
+            await s.ws.send_text(json.dumps(msg))
         if onlookers:
             s.boxes_by_seq[frame.seq] = onlookers
             if len(s.boxes_by_seq) > 600:

@@ -210,3 +210,19 @@ def test_stream_rejects_oversized_text(admin, app, client):
         ws.send_text("x" * 20000)
         with pytest.raises(WebSocketDisconnect):
             ws.receive_text()
+
+
+def test_stream_debug_messages_only_when_asked(admin, app, client):
+    _, token = paired(admin, app, client)
+    with client.websocket_connect("/api/v1/stream", headers=auth(token)) as ws:
+        assert json.loads(ws.receive_text())["type"] == "ready"
+        ws.send_text(json.dumps({"type": "hello", "settings": {"mode": "head", "debug": True, "cooldown_sec": 600}}))
+        ws.send_bytes(_frame(1))
+        msg = json.loads(ws.receive_text())
+        assert msg["type"] == "debug" and msg["seq"] == 1 and msg["mode"] == "head"
+        assert [f["role"] for f in msg["faces"]] == ["owner", "onlooker"]
+        # Turned off again: the next frame (the onlooker's second) brings the alert, and no debug message.
+        ws.send_text(json.dumps({"type": "settings", "settings": {"mode": "head", "debug": False, "cooldown_sec": 600}}))
+        time.sleep(0.1)
+        ws.send_bytes(_frame(2))
+        assert json.loads(ws.receive_text())["type"] == "alert"

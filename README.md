@@ -75,6 +75,9 @@ Settings:
   server is unreachable.
 - **Battery:** camera frame rate, resolution, efficient frame conversion. The camera is always off while
   the screen is off.
+- **Troubleshooting → Debug view:** a live view of what detection sees: every face, whether it counts as you,
+  as looking or not (and why), head and gaze angles, laser rays. Works for detection on the phone and on the
+  server. Nothing is saved.
 
 Notes:
 - Without a paired server nothing leaves the phone. With one, frames go only to your server, over TLS.

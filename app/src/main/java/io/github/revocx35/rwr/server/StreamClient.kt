@@ -24,6 +24,8 @@ class StreamClient(private val account: ServerAccount, private val listener: Lis
         fun onConnected()
         fun onDisconnected(reason: String)
         fun onAlert(alert: JSONObject)
+        /** Per-frame decisions; the server sends them only while the settings ask for "debug". */
+        fun onDebug(msg: JSONObject) = Unit
         /** The server refused this device (revoked/unpaired): retrying won't help. */
         fun onRejected(reason: String)
     }
@@ -88,6 +90,7 @@ class StreamClient(private val account: ServerAccount, private val listener: Lis
                         listener.onConnected()
                     }
                     "alert" -> listener.onAlert(msg)
+                    "debug" -> listener.onDebug(msg)
                     "stats" -> Log.d(TAG, "server stats: $text")
                 }
             }

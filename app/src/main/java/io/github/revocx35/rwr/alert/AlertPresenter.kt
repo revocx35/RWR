@@ -48,8 +48,12 @@ class AlertPresenter(private val context: Context) {
     /**
      * [savedUri]: the photo in the gallery, if saved. [clipPending]: a video clip is being recorded for this alert;
      * call [clipReady] when it is saved. [note] is appended to the subtitle (e.g. "sent to Immich").
+     * [overlay] false: notification only (the debug view is open and would be covered by the pop-up).
      */
-    fun show(snapshot: Bitmap, savedUri: Uri?, onlookerCount: Int, at: Long, clipPending: Boolean = false, note: String? = null) {
+    fun show(
+        snapshot: Bitmap, savedUri: Uri?, onlookerCount: Int, at: Long, clipPending: Boolean = false,
+        note: String? = null, overlay: Boolean = true,
+    ) {
         val subtitle = buildString {
             append(DateFormat.getTimeFormat(context).format(Date(at)))
             if (onlookerCount > 1) append(" · $onlookerCount people")
@@ -60,7 +64,7 @@ class AlertPresenter(private val context: Context) {
         val id = nextNotificationId++
         if (clipPending) pending = PendingClip(at, id, snapshot, subtitle)
         postNotification(id, snapshot, savedUri, "image/jpeg", subtitle)
-        if (Prefs(context).overlayPopup && Settings.canDrawOverlays(context)) {
+        if (overlay && Prefs(context).overlayPopup && Settings.canDrawOverlays(context)) {
             showOverlay(snapshot, savedUri, "image/jpeg", subtitle, clipPending)
         }
     }

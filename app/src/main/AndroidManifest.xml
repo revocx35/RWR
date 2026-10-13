@@ -47,6 +47,11 @@
             android:label="Pair with server" />
 
         <activity
+            android:name=".ui.DebugActivity"
+            android:exported="false"
+            android:label="Debug view" />
+
+        <activity
             android:name=".ui.ServerSettingsActivity"
             android:exported="false"
             android:label="Server settings" />

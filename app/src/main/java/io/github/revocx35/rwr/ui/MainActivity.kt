@@ -234,7 +234,7 @@ class MainActivity : ComponentActivity() {
                         "turned. More accurate, more CPU on the phone (none in server mode)."
                 )
                 var ignoreOwner by remember { mutableStateOf(prefs.ignoreOwner) }
-                SwitchRow("Ignore my face (largest face in view)", ignoreOwner) {
+                SwitchRow("Ignore my face (largest face turned toward the camera)", ignoreOwner) {
                     ignoreOwner = it; prefs.ignoreOwner = it
                 }
                 var angle by remember { mutableFloatStateOf(prefs.maxHeadAngle) }
@@ -316,6 +316,12 @@ class MainActivity : ComponentActivity() {
                 var efficient by remember { mutableStateOf(prefs.efficientConversion) }
                 SwitchRow("Convert only analysed frames", efficient) { efficient = it; prefs.efficientConversion = it }
                 Hint("Recommended. Turning it off converts every camera frame (the old behaviour). Only useful for troubleshooting.")
+            }
+            Section("Troubleshooting") {
+                OutlinedButton(onClick = { startActivity(Intent(this@MainActivity, DebugActivity::class.java)) },
+                    modifier = Modifier.fillMaxWidth()) { Text("Debug view") }
+                Hint("Live view of what detection sees: every face, why it counts or not, angles and gaze. Works with " +
+                    "detection on the phone and on the server. Nothing is saved.")
             }
             Text(
                 "Tip: Android shows a green camera dot while RWR is watching. The camera is released " +

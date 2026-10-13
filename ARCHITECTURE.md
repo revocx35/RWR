@@ -51,8 +51,9 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 | `server/StreamClient.kt` | WebSocket client: hello/settings JSON, binary frames (16-byte header + JPEG), alerts back. Drops frames when more than 512 KB is queued; reconnects with backoff up to 60 s. Stops for good when the server refuses the device (HTTP 403 or close code 4403). |
 | `alert/AlertPresenter.kt` | Pop-up overlay plus notification. For video, it shows "Saving clip…" and then switches to "Open clip" via `clipReady()`. |
 | `alert/SnapshotStore.kt` | MediaStore writes for JPEG and MP4 into `Pictures/RWR`; no storage permission needed. |
-| `ui/MainActivity.kt` | Compose. Sections: status, permissions, Detection (head/eye, angles, cooldown), Snapshots (pop-up, photo/video, before/after seconds, save to Gallery/Immich/Both), Server (pair, on phone/on server, fallback, server settings, unpair), Battery. |
+| `ui/MainActivity.kt` | Compose. Sections: status, permissions, Detection (head/eye, angles, cooldown), Snapshots (pop-up, photo/video, before/after seconds, save to Gallery/Immich/Both), Server (pair, on phone/on server, fallback, server settings, unpair), Battery, Troubleshooting (debug view). |
 | `ui/PairActivity.kt` | QR scanner (CameraX back camera + ZXing core, no Play Services) or paste field; confirm dialog showing the URL and pin; then `ServerApi.pair`. Stops the watcher while scanning. |
+| `ui/DebugActivity.kt` + `detection/DebugFeed.kt` | Live debug view: the analysed frame with every face, its `FaceRole` (you / looking / not looking / turned away / not a face / too small), head angles, eye and gaze angles, laser rays; source (phone or server), analysis time, fps, an ALERT banner. `DebugFeed` is an in-memory `StateFlow`; `WatcherService` publishes only while the view is open (`DebugFeed.active`), so it costs nothing otherwise. While open, the alert pop-up is held back (the notification still posts). In server mode the phone sets `"debug": true` in the stream settings and draws the server's per-frame `debug` messages on its own buffered frame (`FrameRing`), throttled to ~6/s. Nothing is saved. |
 | `ui/ServerSettingsActivity.kt` | Edits server settings through the device API. Only offered when the admin allowed this device; the API key field is write-only. |
 | `Prefs.kt` | All user settings. `CAMERA_KEYS` changes rebind the camera; `KEY_SERVER` reconnects; `STREAM_KEYS` changes are pushed to the server live. |
 | `tile/*`, `src/debug/*` | Unchanged from v1.0 (tile trampoline; debug-only frame injection). |
@@ -79,13 +80,16 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 
 ```
 phone → server  text    {"type":"hello"|"settings","settings":{mode, ignore_owner, max_head_angle,
-                         max_gaze_angle, cooldown_sec, media, pre_sec, post_sec, save_immich}}
+                         max_gaze_angle, cooldown_sec, media, pre_sec, post_sec, save_immich, debug}}
 phone → server  binary  u8 version=1 | u8 rotation quarter-turns (clockwise) | u8 flags (bit0 = mirror)
                          | u8 0 | u32 seq | i64 capture time ms (big-endian) | JPEG (sensor orientation)
 server → phone  text    {"type":"ready","max_fps":40}
                          {"type":"alert","seq":n,"ts":ms,"width":w,"height":h,
                           "faces":[{"box":[l,t,r,b],"yaw":..,"pitch":..,"gaze":[y,p],"rays":[[x0,y0,x1,y1],..]}]}
                          {"type":"stats","fps_in":..,"fps_analysed":..}
+                         {"type":"debug","seq":n,"mode":"head"|"eye","ms":analysis ms,
+                          "faces":[{..same as alert.., "eyes_open":bool, "role":"owner"|"onlooker"|"not_looking"|
+                                    "no_face"|"too_small"}]}      only while settings.debug is true
 close codes     4401 bad token (HTTP 403 before accept), 4403 revoked, 4409 replaced, 4429 too many streams
 ```
 

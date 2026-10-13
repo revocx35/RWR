@@ -108,6 +108,12 @@ The emulator camera tops out at 640×480, so the High resolution setting can't b
   then drive pages with `scripts/chrome_cdp.py` (DevTools via `adb forward tcp:9222
   localabstract:chrome_devtools_remote`). This is more reliable than typing.
 
+Debug view (`ui/DebugActivity.kt`, all builds, Main screen → Troubleshooting): the quickest way to see why a face
+counts or not, on the phone and on the server. To drive it on the emulator, turn the pop-up off first
+(`<boolean name="overlay_popup" value="false" />` via `scripts/set_prefs.sh`), otherwise it swallows the swipes that
+`ui_tap.sh` uses to scroll. After an emulator boot a "Pixel Launcher isn't responding" dialog sometimes blocks the
+screen: `scripts/ui_tap.sh "Close app"`. Server mode: the server log shows `debug=True` while the view is open.
+
 Debug-only frame injection (bypasses the camera, same detection/alert path; frames are interleaved with
 camera frames, so inject 2–3 times quickly to satisfy the 2-of-3 gate):
 
