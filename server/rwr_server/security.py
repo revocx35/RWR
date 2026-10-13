@@ -156,6 +156,16 @@ def load_session(db: DB, raw: str | None) -> Session | None:
     return Session(h, row["stage"], row["csrf"], row["created"], now)
 
 
+def session_alive(db: DB, id_hash: str) -> bool:
+    """Whether the session still exists and hasn't expired, without counting as activity (long-running
+    responses like the live view must end when the session ends, not keep it alive)."""
+    row = db.one("SELECT stage, created, last_seen FROM sessions WHERE id_hash = ?", (id_hash,))
+    if row is None or row["stage"] != "full":
+        return False
+    now = time.time()
+    return now - row["last_seen"] <= SESSION_IDLE_S and now - row["created"] <= SESSION_ABSOLUTE_S
+
+
 def delete_session(db: DB, id_hash: str) -> None:
     db.execute("DELETE FROM sessions WHERE id_hash = ?", (id_hash,))
 

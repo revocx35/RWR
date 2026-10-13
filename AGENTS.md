@@ -52,6 +52,8 @@ docker compose -p rwrtest up -d --build        # local instance; settings come f
   `asyncio.gather` is how to test concurrency; TestClient is sequential. Starlette's `BaseHTTPMiddleware` wraps
   exceptions in an `ExceptionGroup`, hence `except*` in `BodyLimit`.
 - Any new code that decodes images from the network must check `frame_size_ok()` first.
+- TestClient buffers whole responses, so tests of the endless live-view MJPEG stream monkeypatch
+  `web.LIVE_MAX_S` to a second or two and feed phone frames from a background thread.
 - Published image: `ghcr.io/revocx35/rwr-server:<version>` + `latest`. On release: bump `RWR_VERSION`'s default in
   `docker-compose.yml`, `docker build -t ghcr.io/revocx35/rwr-server:X.Y.Z -t ...:latest .`, check that `/data` is empty
   in the image, `gh auth token | docker login ghcr.io -u revocx35 --password-stdin`, push, `docker logout ghcr.io`.

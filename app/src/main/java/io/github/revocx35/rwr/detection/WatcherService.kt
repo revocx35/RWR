@@ -504,6 +504,7 @@ class WatcherService : LifecycleService() {
     private fun stopStream() {
         stream?.stop()
         stream = null
+        _webViewers.value = 0
         _serverState.value = ServerState.OFF
     }
 
@@ -516,6 +517,7 @@ class WatcherService : LifecycleService() {
         }
 
         override fun onDisconnected(reason: String) {
+            _webViewers.value = 0
             _serverState.value = if (prefs.fallbackLocal) ServerState.FALLBACK else ServerState.CONNECTING
             onMain { updateStatusNotification() }
         }
@@ -528,6 +530,12 @@ class WatcherService : LifecycleService() {
 
         override fun onAlert(alert: JSONObject) {
             analysisExecutor.execute { handleServerAlert(alert) }
+        }
+
+        override fun onViewers(count: Int) {
+            Log.i(TAG, "web UI live viewers: $count")
+            _webViewers.value = count
+            onMain { updateStatusNotification() }
         }
 
         override fun onDebug(msg: JSONObject) {
@@ -659,10 +667,11 @@ class WatcherService : LifecycleService() {
                 R.string.notif_fallback_text
             else -> R.string.notif_connecting_text
         }
+        val watched = !paused && state == ServerState.CONNECTED && _webViewers.value > 0
         return NotificationCompat.Builder(this, RwrApp.CHANNEL_WATCH)
             .setSmallIcon(R.drawable.ic_eye)
-            .setContentTitle(getString(R.string.notif_watching_title))
-            .setContentText(getString(text))
+            .setContentTitle(getString(if (watched) R.string.notif_live_view_title else R.string.notif_watching_title))
+            .setContentText(getString(if (watched) R.string.notif_live_view_text else text))
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(0, getString(R.string.action_stop), stop)
@@ -698,6 +707,9 @@ class WatcherService : LifecycleService() {
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running.asStateFlow()
+        private val _webViewers = MutableStateFlow(0)
+        /** People watching this phone's frames live in the server's web UI (server mode only). */
+        val webViewers: StateFlow<Int> = _webViewers.asStateFlow()
         private val _serverState = MutableStateFlow(ServerState.OFF)
         val serverState: StateFlow<ServerState> = _serverState.asStateFlow()
 

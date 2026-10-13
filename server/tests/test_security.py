@@ -221,3 +221,91 @@ def test_event_storage_is_capped(app, tmp_path):
     kept = [r["id"] for r in app.state.db.all("SELECT id FROM events WHERE file IS NOT NULL ORDER BY id")]
     assert kept == ids[-2:]
     assert sum(p.stat().st_size for p in (tmp_path / "ev").iterdir()) <= 2500
+
+
+# --- web live view (shows a live camera picture: off by default, web-only switch, ends with the session) ---
+
+def _enable_live(admin):
+    page = admin.get("/settings")
+    r = admin.post("/settings", data={"csrf": csrf_of(page.text), "web_live_view": "on", "immich_album": "RWR",
+                                      "retention_days": "7", "min_face_px": "16", "detector_score": "0.6",
+                                      "keep_events": "on"})
+    assert r.status_code == 200, r.text   # redirect followed back to /settings
+
+
+def test_live_view_is_off_by_default_and_phones_cant_switch_it_on(admin, app, client):
+    _, token = paired(admin, app, client)
+    assert "Live view is <strong>off</strong>" in admin.get("/live").text
+    assert admin.get("/live/1/stream").status_code == 403
+    r = client.put("/api/v1/config", headers=auth(token), json={"web_live_view": True})
+    assert r.status_code == 400 and "web UI" in r.json()["error"]
+    assert server_settings.load(app.state.db)["web_live_view"] is False
+
+
+def test_live_view_needs_a_session(app, client):
+    app.state.db.execute("INSERT INTO settings(key, value) VALUES('server', ?)", ('{"web_live_view": true}',))
+    r = client.get("/live/1/stream", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def test_live_view_streams_annotated_frames_and_tells_the_phone(admin, app, client, monkeypatch):
+    import threading
+    import rwr_server.web as web
+    from test_api import _frame
+    monkeypatch.setattr(web, "LIVE_MAX_S", 1.5)
+    _, token = paired(admin, app, client)
+    _enable_live(admin)
+    dev_id = client.get("/api/v1/device", headers=auth(token)).json()["device_id"]
+    with client.websocket_connect("/api/v1/stream", headers=auth(token)) as ws:
+        assert json_type(ws) == "ready"
+        stop = threading.Event()
+
+        def feed():
+            seq = 1
+            while not stop.is_set():
+                ws.send_bytes(_frame(seq))
+                seq += 1
+                time.sleep(0.05)
+        t = threading.Thread(target=feed, daemon=True)
+        t.start()
+        try:
+            r = admin.get(f"/live/{dev_id}/stream")
+        finally:
+            stop.set()
+            t.join()
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("multipart/x-mixed-replace")
+        assert r.headers["x-accel-buffering"] == "no"
+        assert r.content.count(b"--frame") >= 2 and b"\xff\xd8" in r.content
+        # The phone was told while it was being watched, and again when the viewer left.
+        counts = [m["count"] for m in drain(ws) if m.get("type") == "viewers"]
+        assert counts[:1] == [1] and counts[-1] == 0
+    actions = [a["action"] for a in app.state.db.all("SELECT action FROM audit")]
+    assert "live_view_started" in actions and "live_view_ended" in actions
+
+
+def test_live_view_ends_when_signed_out(admin, app, client, monkeypatch):
+    import rwr_server.web as web
+    monkeypatch.setattr(web, "LIVE_MAX_S", 30)
+    _, token = paired(admin, app, client)
+    _enable_live(admin)
+    app.state.db.execute("DELETE FROM sessions")   # e.g. signed out in another tab
+    t0 = time.time()
+    r = admin.get("/live/1/stream", follow_redirects=False)
+    assert r.status_code == 303 and time.time() - t0 < 5
+
+
+def json_type(ws):
+    import json
+    return json.loads(ws.receive_text())["type"]
+
+
+def drain(ws, timeout=1.0):
+    import json
+    msgs, end = [], time.time() + timeout
+    while time.time() < end:
+        try:
+            msgs.append(json.loads(ws.receive_text()))
+        except Exception:
+            break
+    return msgs

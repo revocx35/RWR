@@ -131,7 +131,7 @@ async def put_config(request: Request):
     if data is None:
         return _err(400, "expected a JSON object")
     try:
-        new = server_settings.apply_update(request.app.state.db, data)
+        new = server_settings.apply_update(request.app.state.db, data, from_device=True)
     except server_settings.SettingsError as e:
         return _err(400, str(e))
     request.app.state.db.audit(client_ip(request), "settings_changed", f"device {dev['id']}")

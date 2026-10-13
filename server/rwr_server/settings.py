@@ -17,8 +17,11 @@ DEFAULTS: dict[str, Any] = {
     "retention_days": 7,
     "min_face_px": 16,              # ignore faces smaller than this (pixels wide)
     "detector_score": 0.6,          # YuNet confidence threshold
+    "web_live_view": False,         # admin may watch a streaming phone's analysed frames live in the web UI
 }
 SECRET_KEYS = {"immich_api_key"}
+# Only the web UI may change these: a stolen phone token must not be able to switch on live viewing.
+WEB_ONLY_KEYS = {"web_live_view"}
 # Where the API key (and every snapshot/clip) is sent. Changing any of these requires entering the key again,
 # so a stolen phone token with "may change settings" can't redirect the stored key and the camera clips to
 # its own server.
@@ -40,8 +43,9 @@ class SettingsError(ValueError):
     pass
 
 
-def apply_update(db: DB, changes: dict[str, Any]) -> dict[str, Any]:
-    """Validates and stores [changes]. Unknown keys are rejected; an empty/absent API key keeps the old one."""
+def apply_update(db: DB, changes: dict[str, Any], from_device: bool = False) -> dict[str, Any]:
+    """Validates and stores [changes]. Unknown keys are rejected; an empty/absent API key keeps the old one.
+    [from_device]: the change comes from a phone (device API), which may not touch WEB_ONLY_KEYS."""
     current = load(db)
     new = dict(current)
     for k, v in changes.items():
@@ -49,6 +53,8 @@ def apply_update(db: DB, changes: dict[str, Any]) -> dict[str, Any]:
             continue
         if k not in DEFAULTS:
             raise SettingsError(f"unknown setting: {k}")
+        if from_device and k in WEB_ONLY_KEYS and v != current[k]:
+            raise SettingsError(f"{k} can only be changed in the web UI")
         default = DEFAULTS[k]
         if k in SECRET_KEYS:
             if v is None or v == "":

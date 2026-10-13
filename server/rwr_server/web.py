@@ -9,7 +9,7 @@ import urllib.parse
 import pyotp
 import segno
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
 from . import immich, security
 from . import settings as server_settings
@@ -351,6 +351,7 @@ async def settings_save(request: Request):
         "immich_ca_pem": str(form.get("immich_ca_pem", "")),
         "keep_events": form.get("keep_events") == "on",
         "immich_api_key": str(form.get("immich_api_key", "")),
+        "web_live_view": form.get("web_live_view") == "on",
     }
     try:
         changes["retention_days"] = int(form.get("retention_days", 7))
@@ -418,6 +419,96 @@ async def event_delete(request: Request, event_id: int):
     await _admin_form(request)
     request.app.state.events.delete(event_id)
     raise Redirect("/events?msg=deleted")
+
+
+# ---------------------------------------------------------------- live view
+
+LIVE_MAX_S = 10 * 60        # a live view ends after this; reload the page to continue
+LIVE_MAX_VIEWERS = 2        # across all devices
+LIVE_FPS = 5
+
+
+@router.get("/live")
+@_wrap
+async def live_list(request: Request):
+    s = _admin_page(request)
+    enabled = server_settings.load(_db(request))["web_live_view"]
+    return _render(request, "live.html", {"csrf": s.csrf, "enabled": enabled,
+                                          "streams": request.app.state.hub.status() if enabled else []})
+
+
+@router.get("/live/{device_id}")
+@_wrap
+async def live_page(request: Request, device_id: int):
+    s = _admin_page(request)
+    db = _db(request)
+    if not server_settings.load(db)["web_live_view"]:
+        raise Redirect("/live")
+    dev = db.one("SELECT id, name FROM devices WHERE id = ? AND revoked = 0", (device_id,))
+    if dev is None:
+        return Response(status_code=404)
+    return _render(request, "live.html", {"csrf": s.csrf, "enabled": True, "device": dev,
+                                          "minutes": LIVE_MAX_S // 60})
+
+
+@router.get("/live/{device_id}/stream")
+@_wrap
+async def live_stream(request: Request, device_id: int):
+    """MJPEG stream of the server's analysed frames with every face annotated. No JavaScript needed: the page
+    shows it in an <img>. Ends when the session ends, the setting is switched off, or after LIVE_MAX_S."""
+    s = _admin_page(request)
+    db = _db(request)
+    hub = request.app.state.hub
+    if not server_settings.load(db)["web_live_view"]:
+        return Response("Live view is switched off in Settings.", status_code=403, media_type="text/plain")
+    if db.one("SELECT 1 FROM devices WHERE id = ? AND revoked = 0", (device_id,)) is None:
+        return Response(status_code=404)
+    if hub.total_viewers() >= LIVE_MAX_VIEWERS:
+        return Response("Too many live views open.", status_code=503, media_type="text/plain")
+    ip = client_ip(request)
+    hub.add_viewer(device_id)
+    db.audit(ip, "live_view_started", f"device {device_id}")
+
+    async def frames():
+        from .detector import annotate_live, placeholder
+        started = last_check = time.monotonic()
+        last_n, last_sent, waiting_sent = -1, 0.0, 0.0
+        try:
+            while time.monotonic() - started < LIVE_MAX_S:
+                now = time.monotonic()
+                if now - last_check >= 1.0:
+                    last_check = now
+                    if not security.session_alive(db, s.id_hash) or not server_settings.load(db)["web_live_view"]:
+                        break
+                st = hub.active.get(device_id)
+                live = st.live if st else None
+                jpg = None
+                if live and st.live_n != last_n and now - last_sent >= 1 / LIVE_FPS:
+                    last_n, last_sent = st.live_n, now
+                    header = f"LIVE  server - {live['mode']} mode - {live['ms']} ms - {len(live['faces'])} faces"
+                    jpg = await asyncio.to_thread(_live_jpeg, annotate_live, live["img"], live["faces"], header)
+                elif not live and now - waiting_sent >= 2.0:
+                    waiting_sent = now
+                    msg = "Waiting for the phone (detection must run on the server)" if st is None \
+                        else "Waiting for frames..."
+                    jpg = await asyncio.to_thread(_live_jpeg, lambda img, *_: img, placeholder(msg), [], "")
+                if jpg:
+                    yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpg)).encode()
+                           + b"\r\n\r\n" + jpg + b"\r\n")
+                await asyncio.sleep(0.05)
+        finally:
+            hub.remove_viewer(device_id)
+            db.audit(ip, "live_view_ended", f"device {device_id}")
+
+    return StreamingResponse(frames(), media_type="multipart/x-mixed-replace; boundary=frame", headers={
+        "Cache-Control": "no-store", "X-Accel-Buffering": "no",  # nginx (Proxy Manager) must not buffer it
+    })
+
+
+def _live_jpeg(draw, img, faces, header) -> bytes:
+    import cv2
+    ok, jpg = cv2.imencode(".jpg", draw(img, faces, header), [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return jpg.tobytes() if ok else b""
 
 
 # ---------------------------------------------------------------- account

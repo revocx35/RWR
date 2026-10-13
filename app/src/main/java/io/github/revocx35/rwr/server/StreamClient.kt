@@ -26,6 +26,8 @@ class StreamClient(private val account: ServerAccount, private val listener: Lis
         fun onAlert(alert: JSONObject)
         /** Per-frame decisions; the server sends them only while the settings ask for "debug". */
         fun onDebug(msg: JSONObject) = Unit
+        /** How many people are watching this phone's frames live in the server's web UI. */
+        fun onViewers(count: Int) = Unit
         /** The server refused this device (revoked/unpaired): retrying won't help. */
         fun onRejected(reason: String)
     }
@@ -91,6 +93,7 @@ class StreamClient(private val account: ServerAccount, private val listener: Lis
                     }
                     "alert" -> listener.onAlert(msg)
                     "debug" -> listener.onDebug(msg)
+                    "viewers" -> listener.onViewers(msg.optInt("count").coerceAtLeast(0))
                     "stats" -> Log.d(TAG, "server stats: $text")
                 }
             }

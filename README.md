@@ -57,6 +57,10 @@ Details are in [ARCHITECTURE.md](ARCHITECTURE.md#threat-model-server-mode).
 `RWR_TRUSTED_PROXIES=<proxy IP>` and `RWR_PAIRING_PIN=none` in `.env`. Point the proxy at `http://<server>:8443` with
 WebSocket support and a valid (e.g. Let's Encrypt) certificate, and make sure only the proxy can reach port 8443.
 
+**Live view** (web UI → Live): watch what the server's detector sees on a streaming phone, with every face labelled
+(you / looking / not looking / not a face) and its angles. It shows a live camera picture, so it's off until you switch
+it on in Settings; phones can't switch it on, every viewing is logged, and the phone shows when it's being watched.
+
 Locked out? `docker compose exec rwr python -m rwr_server.admin reset-password`
 
 ## Install & use the app

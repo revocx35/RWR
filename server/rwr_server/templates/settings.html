@@ -23,6 +23,11 @@
   <label class="check"><input type="checkbox" name="keep_events" {{ "checked" if s.keep_events }}> Keep snapshots and clips on this server (viewable under Events)</label>
   <label>Delete events after (days) <input name="retention_days" type="number" min="1" max="365" value="{{ s.retention_days }}"></label>
 
+  <h2>Live view</h2>
+  <label class="check"><input type="checkbox" name="web_live_view" {{ "checked" if s.web_live_view }}> Allow watching a phone's camera live in this web UI (Live page)</label>
+  <p class="muted small">For troubleshooting detection. Off by default: anyone who gets into this web UI could watch the
+  camera while it's on. Phones can't switch it on, every viewing is logged, and the phone shows when it's being watched.</p>
+
   <h2>Detector</h2>
   <label>Ignore faces narrower than (pixels) <input name="min_face_px" type="number" min="8" max="400" value="{{ s.min_face_px }}"></label>
   <label>Face detector confidence (0.3–0.99; applies after restart) <input name="detector_score" type="number" min="0.3" max="0.99" step="0.01" value="{{ s.detector_score }}"></label>

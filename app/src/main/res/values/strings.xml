@@ -22,4 +22,6 @@
     <string name="notif_server_text">Detection runs on your RWR server</string>
     <string name="notif_fallback_text">Server unreachable, detecting on the phone</string>
     <string name="notif_connecting_text">Connecting to your RWR server…</string>
+    <string name="notif_live_view_title">Live view open on your RWR server</string>
+    <string name="notif_live_view_text">Someone is watching this camera in the server\'s web UI</string>
 </resources>

@@ -233,3 +233,53 @@ def annotate(img: np.ndarray, onlookers: list[FaceResult]) -> np.ndarray:
             cv2.line(out, p0, p1, (60, 60, 255), thick, cv2.LINE_AA)
             cv2.circle(out, p0, thick + 1, (220, 220, 255), -1, cv2.LINE_AA)
     return out
+
+
+# Live view (web UI): colours per role, BGR. Same meaning as the app's debug view.
+ROLE_STYLE = {
+    "owner": ((245, 165, 66), "you"),
+    "onlooker": ((54, 67, 244), "LOOKING"),
+    "not_looking": ((0, 179, 255), "not looking"),
+    "no_face": ((251, 64, 224), "not a face"),
+    "too_small": ((158, 158, 158), "too small"),
+}
+
+
+def annotate_live(img: np.ndarray, faces: list[tuple[FaceResult, str]], header: str) -> np.ndarray:
+    """Every face with its role, head angles, gaze and rays, plus a status bar; for the web UI live view."""
+    out = img.copy()
+    h, w = out.shape[:2]
+    scale = max(0.45, w / 1100)
+    thick = max(1, round(w / 400))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    def text(s: str, x: int, y: int, color) -> None:
+        (tw, th), base = cv2.getTextSize(s, font, scale, thick)
+        x = max(0, min(x, w - tw - 4))
+        y = max(th + 4, min(y, h - base - 2))
+        cv2.rectangle(out, (x, y - th - 4), (x + tw + 4, y + base), (0, 0, 0), -1)
+        cv2.putText(out, s, (x + 2, y - 2), font, scale, color, thick, cv2.LINE_AA)
+
+    for i, (f, role) in enumerate(faces, 1):
+        color, label = ROLE_STYLE.get(role, ((255, 255, 255), role))
+        l, t, r, b = f.box
+        cv2.rectangle(out, (l, t), (r, b), color, thick * (2 if role == "onlooker" else 1))
+        for x0, y0, x1, y1 in f.rays:
+            cv2.line(out, (int(x0), int(y0)), (int(x1), int(y1)), color, thick + 1, cv2.LINE_AA)
+        text(f"{i} {label}", l, t - 4, color)
+        if role != "no_face":
+            detail = f"head {f.yaw:+.0f}/{f.pitch:+.0f}"
+            if f.gaze is not None:
+                detail += f" gaze {f.gaze.yaw:+.0f}/{f.gaze.pitch:+.0f}" + ("" if f.gaze.eyes_open else " closed")
+            text(detail, l, b + int(22 * scale) + 4, color)
+    bar = int(30 * scale) + 6
+    cv2.rectangle(out, (0, 0), (w, bar), (0, 0, 0), -1)
+    cv2.putText(out, header, (6, bar - 8), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+    return out
+
+
+def placeholder(message: str, size: tuple[int, int] = (640, 480)) -> np.ndarray:
+    w, h = size
+    out = np.full((h, w, 3), 32, np.uint8)
+    cv2.putText(out, message, (20, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (220, 220, 220), 2, cv2.LINE_AA)
+    return out

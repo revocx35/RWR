@@ -74,6 +74,7 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 | `immich.py` | `POST /api/assets`, then find or create the album and `PUT /api/albums/{id}/assets`. Verified TLS (certifi plus an optional admin CA); `http://` only with an explicit opt-in; no redirects followed; the API key is never logged or returned. |
 | `settings.py` | Runtime settings stored as JSON in SQLite, with validation. `immich_api_key` is write-only: `public_view()` returns only `immich_api_key_set`. |
 | `db.py` | SQLite (WAL), one connection behind a lock; the file is 0600. Holds the audit log (last 2000 entries). |
+| Live view (`web.py` `/live…`, `detector.annotate_live`) | Optional (`web_live_view` setting, off by default, web-only: the device API refuses it). `/live/{device}/stream` is an MJPEG `multipart/x-mixed-replace` response shown in an `<img>`, so the web UI still has no JavaScript. The stream hub keeps a device's latest analysed frame only while it has viewers (`StreamHub.viewers`), renders roles/angles/rays server-side at ≤ 5 fps, sends `X-Accel-Buffering: no` for nginx. Ends when the session is gone (`security.session_alive`, which doesn't count as activity), the setting is switched off, or after 10 minutes; at most 2 viewers in total; start/end in the audit log; the phone is told (`viewers`). |
 | `admin.py` | Recovery CLI `reset-password`: new random password, turns off TOTP, signs out all sessions, clears lockouts. |
 
 ### Stream protocol
@@ -90,6 +91,9 @@ server → phone  text    {"type":"ready","max_fps":40}
                          {"type":"debug","seq":n,"mode":"head"|"eye","ms":analysis ms,
                           "faces":[{..same as alert.., "eyes_open":bool, "role":"owner"|"onlooker"|"not_looking"|
                                     "no_face"|"too_small"}]}      only while settings.debug is true
+                         {"type":"viewers","count":n}   people watching this phone in the web UI live view
+                                                         (sent on change and on connect; the app shows it in
+                                                         its notification and on the main screen)
 close codes     4401 bad token (HTTP 403 before accept), 4403 revoked, 4409 replaced, 4429 too many streams
 ```
 
@@ -141,6 +145,7 @@ Assets: camera frames and clips of people behind the user, the admin account, de
 |---|---|
 | Network attacker (LAN/Wi-Fi) reads or alters the stream | TLS only (the app blocks cleartext app-wide). The app pins the server's public key from the QR code, so a MITM certificate, even a CA-signed one, is refused. |
 | Someone guesses the admin password | argon2id; per-IP (IPv6: per /64) and global lockouts; password and 2FA checks run one at a time (`app.state.auth_lock`), so parallel requests can't slip past the lockout; generic errors with jittered delays; optional TOTP with replay protection and its own global failure cap; the "current password" checks on the account page are throttled the same way; no default password (random, must be changed). Optional `RWR_ADMIN_NETWORKS` hides the whole web UI from other networks (404) while the phone API stays reachable. |
+| Someone in the web UI watches the camera | The live view is off by default and only the web UI can switch it on (not a phone token); every viewing is in the security log; the phone shows "Live view open on your RWR server" while it's watched; sessions end the stream; the view never exists for phones running detection locally. Recorded events are only alert snapshots/clips. |
 | Memory exhaustion by anonymous requests | `BodyLimit` ASGI middleware: 256 KB per request body (81 MB for `/api/v1/media`), enforced while the body streams in, so chunked uploads without Content-Length are cut off too. |
 | Session theft / CSRF / clickjacking | `__Host-` cookie with Secure, HttpOnly, SameSite=Strict; idle and absolute expiry; rotation on login; CSRF token plus Origin check on every POST; `frame-ancestors 'none'` and `X-Frame-Options: DENY`; strict CSP with no inline script. |
 | XSS via device names or other stored text | Jinja autoescape everywhere; no JavaScript at all, and the CSP forbids inline scripts anyway. |

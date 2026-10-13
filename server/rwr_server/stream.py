@@ -94,6 +94,9 @@ class DeviceStream:
     gate: AlertGate = field(default_factory=AlertGate)
     owner: OwnerTracker = field(default_factory=OwnerTracker)
     debug_msg: dict | None = None
+    # Latest analysed frame for the web UI's live view; only kept while someone watches (see StreamHub.viewers).
+    live: dict | None = None
+    live_n: int = 0
     busy: bool = False
     pending: Frame | None = None
     clip: _Clip | None = None
@@ -125,6 +128,8 @@ class StreamHub:
         self.max_streams = max_streams
         self.tmp_dir = tmp_dir
         self.active: dict[int, DeviceStream] = {}
+        # Web UI live viewers per device id (they outlive a phone reconnecting).
+        self.viewers: dict[int, int] = {}
 
     def status(self) -> list[dict]:
         now = time.time()
@@ -133,6 +138,38 @@ class StreamHub:
             "fps_in": round(s.received / max(1.0, now - s.started), 1),
             "fps_analysed": round(s.analysed / max(1.0, now - s.started), 1),
         } for s in self.active.values()]
+
+    def add_viewer(self, device_id: int) -> None:
+        self.viewers[device_id] = self.viewers.get(device_id, 0) + 1
+        self._tell_viewers(device_id)
+
+    def remove_viewer(self, device_id: int) -> None:
+        n = self.viewers.get(device_id, 0) - 1
+        if n > 0:
+            self.viewers[device_id] = n
+        else:
+            self.viewers.pop(device_id, None)
+            s = self.active.get(device_id)
+            if s:
+                s.live = None
+        self._tell_viewers(device_id)
+
+    def total_viewers(self) -> int:
+        return sum(self.viewers.values())
+
+    def _tell_viewers(self, device_id: int) -> None:
+        """The phone shows in its notification that its camera is being watched live in the web UI."""
+        s = self.active.get(device_id)
+        if s and not s.closed:
+            msg = json.dumps({"type": "viewers", "count": self.viewers.get(device_id, 0)})
+            asyncio.get_running_loop().create_task(self._send_quietly(s, msg))
+
+    @staticmethod
+    async def _send_quietly(s: DeviceStream, msg: str) -> None:
+        try:
+            await s.ws.send_text(msg)
+        except Exception:
+            pass
 
     async def disconnect_device(self, device_id: int) -> None:
         s = self.active.get(device_id)
@@ -153,6 +190,8 @@ class StreamHub:
         s = DeviceStream(device_id, device_name, ws)
         self.active[device_id] = s
         await ws.send_text(json.dumps({"type": "ready", "max_fps": MAX_FPS}))
+        if self.viewers.get(device_id):
+            await ws.send_text(json.dumps({"type": "viewers", "count": self.viewers[device_id]}))
         stats_task = asyncio.create_task(self._stats_loop(s))
         try:
             while not s.closed:
@@ -249,6 +288,10 @@ class StreamHub:
             if i is not None:
                 faces[i].owner = True
         onlookers = [f for f in faces if f.looking and not f.owner and f.box[2] - f.box[0] >= min_face_px]
+        if self.viewers.get(s.device_id):
+            s.live = {"img": img, "faces": [(f, _role(f, min_face_px)) for f in detections], "mode": det.mode,
+                      "ms": round((time.perf_counter() - started) * 1000), "ts": frame.ts_ms}
+            s.live_n += 1
         if s.settings.debug:
             s.debug_msg = {
                 "type": "debug", "seq": frame.seq, "mode": det.mode, "ms": round((time.perf_counter() - started) * 1000),

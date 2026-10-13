@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Live view{% if device %}: {{ device.name }}{% endif %}</h1>
+{% if not enabled %}
+<section class="card">
+  <p>Live view is <strong>off</strong>. When it's on, you can watch what the detector sees on a phone that streams to this
+  server: the camera picture with every face, whether it counts as the phone's owner, as looking or not, and its angles.</p>
+  <p class="muted small">It shows a live camera picture, so it's off by default. Only this web UI can switch it on (a phone
+  can't), every viewing is in the security log, and the phone shows in its notification while someone watches.</p>
+  <p><a href="/settings">Switch it on in Settings →</a></p>
+</section>
+{% elif device %}
+<section class="card live">
+  <img class="live" src="/live/{{ device.id }}/stream" alt="Live view of {{ device.name }}">
+  <p class="legend small">
+    <span class="sw owner"></span> you <span class="sw onlooker"></span> LOOKING <span class="sw not_looking"></span> not looking
+    <span class="sw no_face"></span> not a face <span class="sw too_small"></span> too small
+  </p>
+  <p class="muted small">Head and gaze angles are yaw/pitch in degrees (0/0 = straight at the camera). The phone shows
+  “live view open” in its notification while this page is open. The view stops after {{ minutes }} minutes or when you
+  sign out: reload the page to continue. Only works while the phone runs detection on the server.</p>
+  <p><a href="/live">← All phones</a></p>
+</section>
+{% else %}
+<section class="card">
+  {% if streams %}
+  <table><tr><th>Phone</th><th>Mode</th><th>Frames/s</th><th></th></tr>
+  {% for s in streams %}<tr><td>{{ s.name }}</td><td>{{ s.mode }}</td><td>{{ s.fps_in }}</td>
+    <td><a href="/live/{{ s.device_id }}">Watch →</a></td></tr>{% endfor %}
+  </table>
+  {% else %}<p class="muted">No phone is streaming right now. In the app, choose “Detection runs: On server”.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

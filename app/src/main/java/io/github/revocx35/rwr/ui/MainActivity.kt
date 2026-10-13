@@ -337,6 +337,7 @@ class MainActivity : ComponentActivity() {
         val a = account
         val state by WatcherService.serverState.collectAsStateWithLifecycle()
         val running by WatcherService.running.collectAsStateWithLifecycle()
+        val viewers by WatcherService.webViewers.collectAsStateWithLifecycle()
         Section("Server") {
             if (a == null) {
                 Text("Run detection on your own RWR server (Docker) instead of the phone: max-quality " +
@@ -363,6 +364,10 @@ class MainActivity : ComponentActivity() {
                     color = if (state == WatcherService.ServerState.CONNECTED) Color(0xFF2E7D32)
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (viewers > 0 && state == WatcherService.ServerState.CONNECTED) {
+                    Text("● Live view open in the server's web UI: someone is watching this camera",
+                        color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
+                }
             }
             if (onServer) {
                 var fallback by remember { mutableStateOf(prefs.fallbackLocal) }
