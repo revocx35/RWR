@@ -34,6 +34,7 @@ MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_TEXT_BYTES = 16 * 1024
 MAX_FPS = 40                       # frames above this rate are dropped
 MAX_CLIP_SIDE_S = 30
+LOG_INTERVAL_S = 30                 # per-device performance log line
 MAX_CLIP_BYTES = 256 * 1024 * 1024   # JPEG data collected for one clip; the clip ends early beyond this
 
 
@@ -103,6 +104,9 @@ class DeviceStream:
     boxes_by_seq: dict[int, list[FaceResult]] = field(default_factory=dict)
     received: int = 0
     analysed: int = 0
+    # Performance counters for the periodic log line (reset every LOG_INTERVAL_S).
+    perf: dict = field(default_factory=lambda: {"in": 0, "bytes": 0, "analysed": 0, "ms": 0.0, "age": 0.0,
+                                                 "skipped": 0, "size": ""})
     last_frame_at: float = 0.0
     started: float = field(default_factory=time.time)
     closed: bool = False
@@ -243,6 +247,11 @@ class StreamHub:
             return  # too fast: drop
         s.last_frame_at = now
         s.received += 1
+        s.perf["in"] += 1
+        s.perf["bytes"] += len(data)
+        s.perf["age"] += max(0.0, now * 1000 - ts)  # phone and server clocks are normally NTP-synced
+        if s.busy:
+            s.perf["skipped"] += 1   # arrives while the previous frame is being analysed: a newer one may replace it
         frame = Frame(seq, ts, bytes(data[HEADER.size:]), rot & 3, bool(flags & 1))
         s.buffer.add(frame)
         if s.clip:
@@ -265,7 +274,9 @@ class StreamHub:
                 det = DetectSettings(cs.mode, cs.max_head_angle, cs.max_gaze_angle)
                 result = await loop.run_in_executor(self.pool, self._analyse, s, frame, det, srv["min_face_px"])
                 s.analysed += 1
+                s.perf["analysed"] += 1
                 if result is not None:
+                    s.perf["size"] = f"{result[0].shape[1]}x{result[0].shape[0]}"
                     await self._after_analysis(s, frame, *result)
                 frame, s.pending = s.pending, None
         except Exception:  # never let one bad frame kill the stream
@@ -276,6 +287,12 @@ class StreamHub:
     def _analyse(self, s: DeviceStream, frame: Frame, det: DetectSettings, min_face_px: int):
         """Runs in the detector pool; frames of one stream are analysed one at a time (see _analyse_loop)."""
         started = time.perf_counter()
+        try:
+            return self._analyse_timed(s, frame, det, min_face_px, started)
+        finally:
+            s.perf["ms"] += (time.perf_counter() - started) * 1000
+
+    def _analyse_timed(self, s: DeviceStream, frame: Frame, det: DetectSettings, min_face_px: int, started: float):
         img = decode_frame(frame.jpeg, frame.rotation, frame.mirror)
         if img is None:
             return None
@@ -373,8 +390,18 @@ class StreamHub:
             log.exception("clip encoding failed for device %s", device_id)
 
     async def _stats_loop(self, s: DeviceStream) -> None:
+        last_log = time.monotonic()
         while True:
             await asyncio.sleep(10)
+            if time.monotonic() - last_log >= LOG_INTERVAL_S:
+                elapsed, last_log = time.monotonic() - last_log, time.monotonic()
+                p, s.perf = s.perf, {"in": 0, "bytes": 0, "analysed": 0, "ms": 0.0, "age": 0.0, "skipped": 0, "size": ""}
+                if p["in"]:
+                    log.info("device %s perf: in %.1f fps (%.0f KB avg, %.0f KB/s), analysed %.1f fps at %s "
+                             "(%.0f ms each), frame age on arrival %.0f ms, arrived while busy %d%%",
+                             s.device_id, p["in"] / elapsed, p["bytes"] / p["in"] / 1024, p["bytes"] / elapsed / 1024,
+                             p["analysed"] / elapsed, p["size"] or "?", p["ms"] / max(1, p["analysed"]),
+                             p["age"] / p["in"], 100 * p["skipped"] // p["in"])
             elapsed = max(1.0, time.time() - s.started)
             try:
                 await s.ws.send_text(json.dumps({
