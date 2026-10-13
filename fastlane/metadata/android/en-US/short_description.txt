@@ -1,0 +1,1 @@
+Warns you when someone behind you looks at your screen (shoulder surfing)

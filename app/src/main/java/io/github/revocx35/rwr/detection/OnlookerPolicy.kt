@@ -87,6 +87,8 @@ object OnlookerPolicy {
 
     /** Eye tracking only runs on faces turned at most this far (beyond it the eyes can't reach the screen). */
     const val EYE_PREFILTER_ANGLE = 60f
+    /** Head mode: faces whose rough (detector) yaw is beyond this are not measured further. */
+    const val HEAD_PREFILTER_ANGLE = 45f
     /** Below this face width the irises are a few pixels wide: decide by head pose instead. */
     const val MIN_EYE_FACE_PX = 40
 

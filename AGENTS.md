@@ -8,16 +8,27 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first. Keep both files updated when beha
 export ANDROID_HOME=/opt/android-sdk          # on the dev LXC; local.properties has sdk.dir
 ./gradlew testDebugUnitTest assembleDebug     # JVM unit tests (policy, gaze, pairing link, frame ring) + debug APK
 ./gradlew assembleRelease                     # R8-minified, per-ABI + universal APKs. ALWAYS smoke-test on the
-                                              # emulator: R8 has broken ML Kit once and MediaPipe twice
+                                              # emulator: R8 has broken (now removed) ML Kit once and MediaPipe twice
                                               # (protobuf fields, Flogger); see proguard-rules.pro
 ```
 
 The first build downloads `app/src/main/assets/face_landmarker.task` (git-ignored, SHA-256 checked in
-`app/build.gradle.kts`; same file and hash as `server/models.sha256`).
+`app/build.gradle.kts`; same file and hash as `server/models.sha256`). The YuNet face detector
+(`assets/face_detection_yunet_2023mar_640.tflite`) is committed; `tools/convert_yunet.sh` rebuilds it byte-identically
+from the ONNX model in Docker and checks it against OpenCV. The converter needs a square input (640×640): with a
+non-square one it produces a model whose reshapes don't match.
+
+Telemetry check for release APKs (must print zeros and no datatransport service/receiver):
+`cat classes*.dex | grep -c -a "Lcom/google/android/datatransport/cct/internal/"` after unzipping, and
+`aapt2 dump xmltree --file AndroidManifest.xml <apk> | grep -E "E: (service|receiver)" -A3`.
 
 Toolchain pins (gradle/libs.versions.toml): AGP 9.4.1 (compiles Kotlin itself, so don't apply
-`kotlin-android` in app/), Gradle 9.8, Kotlin 2.4.20, CameraX 1.6.2, ML Kit face-detection 16.1.7,
-MediaPipe tasks-vision 0.10.35 (1.x pulls in an LLM runtime; not needed), OkHttp 5.5.0, ZXing core 3.5.4.
+`kotlin-android` in app/), Gradle 9.8, Kotlin 2.4.20, CameraX 1.6.2, LiteRT 1.4.2 (classic Interpreter API; 2.x is
+~2× larger and adds a GPU accelerator we don't need), MediaPipe tasks-vision 0.10.35 (1.x pulls in an LLM runtime; not
+needed), OkHttp 5.5.0, ZXing core 3.5.4. No Google Play Services, Firebase or ML Kit: the app is on F-Droid, which
+rejects closed-source dependencies. Before adding a dependency, check its tree for `com.google.android.gms`,
+`com.google.firebase`, `com.google.mlkit` and `com.google.android.datatransport` (telemetry); see the MediaPipe exclusion
+in `app/build.gradle.kts`.
 `gradle.properties` is tuned for a 3-core / 16 GB host (one daemon, in-process Kotlin).
 
 ## Server (`server/`)
@@ -152,7 +163,9 @@ adb shell am broadcast -n io.github.revocx35.rwr/.DebugInjectReceiver --es path 
 
 ## Releasing
 
-1. Bump `versionCode` and `versionName` in `app/build.gradle.kts`, then commit.
+1. Bump `baseVersionCode` and `versionName` in `app/build.gradle.kts` (F-Droid's per-ABI codes derive from it), add
+   `fastlane/metadata/android/en-US/changelogs/<10×base+1..3>.txt` (and `<base>.txt`), then commit and tag `vX.Y.Z`
+   (F-Droid's update check follows tags).
 2. `./gradlew clean testDebugUnitTest assembleRelease`. Signing comes from `keystore.properties`, which is git-ignored.
    On the dev LXC it's a symlink to the key material kept **outside the repo** in a `chmod 700` directory.
    Never copy the keystore or its password into the repo, docs, or release notes.

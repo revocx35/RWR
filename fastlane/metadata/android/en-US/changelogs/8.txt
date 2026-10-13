@@ -1,0 +1,4 @@
+First F-Droid release (1.5.0).
+- Face detection now uses the open-source YuNet detector (same as the RWR server) instead of Google ML Kit: about half the CPU, and good at small faces.
+- MediaPipe's usage-statistics client can no longer send anything: its Google telemetry transport is replaced by a do-nothing stand-in.
+- Fewer false alerts: far-away faces never count, every candidate face is verified, an onlooker must stay half a second.

@@ -14,6 +14,13 @@ val keystoreProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+// F-Droid builds one APK per ABI: -Prwr.abi=arm64-v8a (or armeabi-v7a, x86_64) builds only that ABI, without
+// splits, with versionCode = 10 * base + ABI number (see metadata/ in fdroiddata). Unset: the usual split build.
+val singleAbi: String? = providers.gradleProperty("rwr.abi").orNull
+val abiCodes = mapOf("armeabi-v7a" to 1, "arm64-v8a" to 2, "x86_64" to 3)
+require(singleAbi == null || singleAbi in abiCodes) { "rwr.abi must be one of ${abiCodes.keys}" }
+val baseVersionCode = 8
+
 android {
     namespace = "io.github.revocx35.rwr"
     compileSdk = 37
@@ -23,8 +30,9 @@ android {
         // 29: MediaStore RELATIVE_PATH lets us write to the gallery without storage permissions.
         minSdk = 29
         targetSdk = 37
-        versionCode = 7
-        versionName = "1.4.0"
+        versionCode = if (singleAbi != null) 10 * baseVersionCode + abiCodes.getValue(singleAbi) else baseVersionCode
+        versionName = "1.5.0"
+        if (singleAbi != null) ndk { abiFilters += singleAbi }
     }
 
     dependenciesInfo {
@@ -57,7 +65,7 @@ android {
     // nearly every current phone needs) plus a universal one; x86_64 is kept for emulator smoke tests.
     splits {
         abi {
-            isEnable = true
+            isEnable = singleAbi == null
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
             isUniversalApk = true
@@ -66,6 +74,8 @@ android {
 
     // Compress native libraries in the APK: much smaller download, extracted once at install.
     packaging { jniLibs { useLegacyPackaging = true } }
+    // LiteRT memory-maps the face detector model straight from the APK, so it must be stored uncompressed.
+    androidResources { noCompress += "tflite" }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -92,8 +102,15 @@ dependencies {
     implementation(libs.camerax.camera2)
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
-    implementation(libs.mlkit.face.detection)
-    implementation(libs.mediapipe.tasks.vision)
+    implementation(libs.litert)
+    implementation(libs.mediapipe.tasks.vision) {
+        // MediaPipe's usage-statistics client would send events to Google (Clearcut) through these. RWR never sends
+        // analytics: they are left out and app/src/main/java/com/google/android/datatransport/ has do-nothing
+        // stand-ins for the few classes MediaPipe calls. transport-api (interfaces only) stays.
+        exclude(group = "com.google.android.datatransport", module = "transport-runtime")
+        exclude(group = "com.google.android.datatransport", module = "transport-backend-cct")
+        exclude(group = "com.google.firebase")
+    }
     implementation(libs.okhttp)
     implementation(libs.zxing.core)
 

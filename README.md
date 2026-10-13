@@ -13,6 +13,8 @@ It runs in the background and can be toggled from the **Quick Settings** panel (
 
 ## Detection modes
 
+Faces are found with YuNet (the same open-source detector the server uses), which also spots small faces.
+
 - **Head tracking**: a face turned toward the screen counts as looking. Lightest on battery.
 - **Eye tracking**: follows the irises (MediaPipe Face Landmarker, the same kind of model behind "laser eyes"
   filters) and combines them with head pose. It alerts only when the eyes point at the screen, even if the
@@ -65,7 +67,7 @@ Locked out? `docker compose exec rwr python -m rwr_server.admin reset-password`
 
 ## Install & use the app
 
-1. Grab the APK from [Releases](https://github.com/revocx35/RWR/releases). `arm64-v8a` fits almost every
+1. Grab the APK from [Releases](https://github.com/revocx35/RWR/releases) (F-Droid: coming soon). `arm64-v8a` fits almost every
    current phone; `universal` works everywhere. Install it and open **RWR**.
 2. Grant **Camera**, **Notifications**, and **Display over other apps** (needed for the pop-up).
 3. Tap **Start watching**, or add the Quick Settings toggle.
@@ -106,5 +108,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works and [AGENTS.md](AGENTS.m
 
 ## License
 
-RWR is free software, licensed under the [GNU General Public License v3.0](LICENSE). Bundled models:
-MediaPipe Face Landmarker (Apache-2.0) and OpenCV YuNet (MIT).
+RWR is free software, licensed under the [GNU General Public License v3.0](LICENSE). Bundled models: YuNet face
+detector (OpenCV Zoo, MIT) and MediaPipe Face Landmarker (Apache-2.0); libraries: MediaPipe Tasks and LiteRT (Apache-2.0),
+OkHttp, ZXing, AndroidX (Apache-2.0).

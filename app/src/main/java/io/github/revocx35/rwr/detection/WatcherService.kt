@@ -129,7 +129,7 @@ class WatcherService : LifecycleService() {
         super.onCreate()
         prefs = Prefs(this)
         presenter = AlertPresenter(this)
-        finder = FaceFinder()
+        finder = runCatching { FaceFinder(this) }.onFailure { Log.e(TAG, "face detector unavailable", it) }.getOrNull()
         account = ServerAccount.load(this)
         updateRingLength()
         prefs.register(prefListener)
@@ -364,33 +364,39 @@ class WatcherService : LifecycleService() {
 
     /**
      * Decides one non-owner face. Faces too small to be reading the screen are skipped first
-     * ([OnlookerPolicy.isTooSmall]). Face Landmarker runs only where it matters: in head mode only on faces that
-     * would alert (so it stays idle while only the owner is in view), in eye mode on faces turned roughly toward
-     * the camera. A detection where it finds no face is dropped (see [OnlookerPolicy.isVerified]).
+     * ([OnlookerPolicy.isTooSmall]). Face Landmarker runs only on non-owner faces turned roughly toward the camera
+     * (so it stays idle while only the owner is in view); it verifies the face ([OnlookerPolicy.isVerified]) and
+     * measures the head pose and gaze that decide.
      */
     private fun judge(upright: Bitmap, face: FaceBox): FaceVerdict {
         if (OnlookerPolicy.isTooSmall(face, upright.width)) return FaceVerdict(face, FaceRole.TOO_SMALL)
         val eye = prefs.detectionMode == DetectionMode.EYE
         val maxHead = prefs.maxHeadAngle
-        if (!eye && !OnlookerPolicy.isLookingAtCamera(face, maxHead)) return FaceVerdict(face, FaceRole.NOT_LOOKING)
-        val limit = OnlookerPolicy.EYE_PREFILTER_ANGLE
-        if (eye && (abs(face.yaw) > limit || abs(face.pitch) > limit)) return FaceVerdict(face, FaceRole.TURNED_AWAY)
+        // YuNet's five-point head pose is rough (pitch especially), so it only prefilters on yaw; faces that pass
+        // are measured again with Face Landmarker, which decides.
+        val limit = if (eye) OnlookerPolicy.EYE_PREFILTER_ANGLE else maxOf(OnlookerPolicy.HEAD_PREFILTER_ANGLE, maxHead + 20f)
+        if (abs(face.yaw) > limit) return FaceVerdict(face, if (eye) FaceRole.TURNED_AWAY else FaceRole.NOT_LOOKING)
         val tracker = landmarker()
         val gaze = tracker?.let { t -> runCatching { t.gaze(upright, face) }.getOrNull() }
         if (tracker != null && !OnlookerPolicy.isVerified(face, gaze != null)) {
             if (BuildConfig.DEBUG) Log.d(TAG, "dropped ${face.width}px face at ${face.left},${face.top}: no landmarks")
             return FaceVerdict(face, FaceRole.NO_FACE)
         }
+        // Landmark head pose replaces the rough one (also what the debug view shows).
+        val measured = if (gaze != null) face.copy(yaw = gaze.headYaw, pitch = gaze.headPitch) else face
         val drawn = if (gaze != null && face.width >= OnlookerPolicy.MIN_EYE_FACE_PX) {
-            face.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
-        } else face
-        if (!eye) return FaceVerdict(drawn, FaceRole.ONLOOKER, gaze)
+            measured.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
+        } else measured
+        if (!eye) {
+            val looking = OnlookerPolicy.isLookingAtCamera(measured, maxHead)
+            return FaceVerdict(drawn, if (looking) FaceRole.ONLOOKER else FaceRole.NOT_LOOKING, gaze)
+        }
         if (BuildConfig.DEBUG && gaze != null) {
             Log.d(TAG, "gaze %d,%d: head %.1f/%.1f eyes %.1f/%.1f -> %.1f/%.1f open=%b".format(
                 face.left, face.top, gaze.headYaw, gaze.headPitch, gaze.eyeYaw, gaze.eyePitch,
                 gaze.yaw, gaze.pitch, gaze.eyesOpen))
         }
-        val looking = OnlookerPolicy.isLookingEyeMode(face, gaze, maxHead, prefs.maxGazeAngle)
+        val looking = OnlookerPolicy.isLookingEyeMode(measured, gaze, maxHead, prefs.maxGazeAngle)
         return FaceVerdict(drawn, if (looking) FaceRole.ONLOOKER else FaceRole.NOT_LOOKING, gaze)
     }
 

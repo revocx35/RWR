@@ -16,7 +16,7 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
                        ▼ (~3 frames/s)                                    every frame ▼            │
               upright + mirrored Bitmap                         FrameCodec.toJpeg (YUV→NV21→JPEG) │
                        ▼                                                  │   └► FrameRing (last N s)
-              FaceFinder (ML Kit faces + head pose)                       ▼                        │
+              FaceFinder (YuNet on LiteRT: faces + rough pose)                ▼                        │
                        ▼                                 StreamClient ══ wss, pinned TLS, token ══►│ server
       head mode: OnlookerPolicy        eye mode: EyeTracker (MediaPipe       ◄══ {"type":"alert"} ═│ YuNet + Face
                        │               Face Landmarker on face crops)        ▼                     │ Landmarker
@@ -36,7 +36,8 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 | File | Role |
 |---|---|
 | `detection/WatcherService.kt` | Camera foreground service; everything per frame happens here on `analysisExecutor`, which is single-threaded. JPEG-encodes frames only when something needs them: the server stream, or the rolling buffer for clips. Local detection is throttled to one frame per 330 ms. Server alerts are handled on the same thread. Clip encoding and uploads run on `mediaExecutor`. Camera and stream are released on `SCREEN_OFF`. Exposes `running` and `serverState` StateFlows. |
-| `detection/FaceFinder.kt` | ML Kit face detection (fast mode, min face 5%, bundled model): face boxes and head Euler angles. |
+| `detection/FaceFinder.kt` + `YuNet.kt` | YuNet face detector (OpenCV Zoo, MIT; the same model as the server) on LiteRT 1.4.2: the upright frame is scaled into a 640×640 BGR input, `YuNet.decode` (pure Kotlin, unit-tested) turns the stride 8/16/32 outputs into boxes + 5 landmarks, NMS 0.3, score ≥ 0.6. Rough head pose from the 5 points (prefilter only; Face Landmarker measures the faces that matter). The model is committed (`assets/face_detection_yunet_2023mar_640.tflite`, 236 KB) and reproducible with `tools/convert_yunet.sh`, which also checks it against OpenCV's FaceDetectorYN. Replaced Google ML Kit in v1.5.0 (closed source, so not allowed on F-Droid); YuNet uses about half the CPU and finds small faces better. |
+| `java/com/google/android/datatransport/…` | Do-nothing stand-ins for Google's datatransport runtime and Clearcut (CCT) destination. MediaPipe Tasks ships a usage-statistics client (`RemoteLoggingClient`) that would send events to Google through them; the real runtime/backend are excluded in `app/build.gradle.kts`, so nothing is ever sent. `transport-api` (interfaces only) stays. Check after MediaPipe upgrades: `RemoteLoggingClient` must still only call `TransportRuntime.initialize/getInstance/newFactory` and `CCTDestination.INSTANCE`, or R8 fails on missing classes. |
 | `detection/EyeTracker.kt` | MediaPipe Face Landmarker (478 points including irises), run on each candidate face: square crop, 1.6× margin, scaled to 256 px, so small faces behind you get enough pixels. Points are mapped back to frame pixels. |
 | `detection/GazeEstimator.kt` | Pure Kotlin, unit-tested; mirrors `server/rwr_server/gaze.py`. Head yaw/pitch from the 3D face plane (cheeks × forehead–chin); eye yaw/pitch from the iris offset inside each eye (`asin(1.25·offset/half-width)`); gaze = head + eyes. Eyes closed if lid gap / width < 0.10. Also builds the laser rays. |
 | `detection/OnlookerPolicy.kt` | Pure Kotlin, unit-tested. `OwnerTracker` picks the owner (see "False-alert defences" below). Head mode: keep non-owner faces with \|yaw\|,\|pitch\| ≤ angle. Eye mode: prefilter at 60°, then the gaze decides; it falls back to the head rule for faces narrower than 40 px. `isTooSmall`: faces narrower than 7% of the frame width (≈ 2 m away) are never onlookers. `isVerified`/`landmarksMatch`: drop any candidate where Face Landmarker finds no face (or a different one). `AlertGate`: the onlooker at about the same place for ≥ 0.5 s in ≥ 60% of the analysed frames (time-based), plus a cooldown. |
@@ -122,10 +123,10 @@ Coordinates are in the upright, mirrored frame, which phone and server build ide
   ≥ 60% of the frames. It used to count 2 of 3 frames, which is 0.66 s on the phone (3 fps) but only 0.15 s on the
   server (13–15 fps), so short phantoms alerted in server mode.
 - **Two detection modes.**
-  - *Head*: ML Kit Euler angles. Cheapest.
+  - *Head*: head pose from Face Landmarker on faces YuNet's rough pose doesn't already rule out. Cheapest.
   - *Eye*: iris gaze. It alerts only when the eyes point at the screen, so it also catches someone who turns their head away but keeps their eyes on your screen. It ignores someone facing the camera but looking elsewhere. On the test photos it rejected a face at 22° gaze that head mode accepted.
   - Phone and server use the same math and agree within about 1° on the same photo.
-- **Eye tracking only on candidate faces.** ML Kit is still the face detector on the phone. MediaPipe runs per non-owner face, so the extra CPU is spent only while someone is in view.
+- **Landmarks only on candidate faces.** YuNet finds the faces; MediaPipe Face Landmarker runs per non-owner face that is large enough and turned roughly toward the camera, so the extra CPU is spent only while someone is in view.
 - **Server detection is "max level".** Every frame at full resolution, YuNet for small and distant faces, landmarks on every face. The phone only JPEG-encodes and sends.
   - On the emulator at 5 fps that is ~6 frames/s in and all of them analysed.
   - Radio cost: about 40 KB per frame at 640×480, roughly 1.6 Mbit/s at 5 fps. Lower the camera frame rate to cut it.
@@ -135,12 +136,13 @@ Coordinates are in the upright, mirrored frame, which phone and server build ide
   - On the phone, video mode JPEG-encodes every camera frame, which costs extra battery; the UI says so.
 - **Camera FGS from the foreground only, not sticky.** Unchanged from v1.0.
 - **R8.** `proguard-rules.pro` keeps:
-  - ML Kit registrars;
+  - LiteRT (`org.tensorflow.lite`), called back from native code;
   - MediaPipe classes and protobuf-lite messages, whose fields are read by reflection;
   - Flogger, which finds its caller by walking the stack.
 
   Without these, eye mode silently falls back to head pose in release builds only. Smoke-test the release APK after dependency bumps.
-- **APK size.** MediaPipe's native code is about 14 MB per ABI. Release builds produce per-ABI APKs (arm64-v8a about 21 MB) plus a universal one, with compressed JNI libs.
+- **APK size.** MediaPipe's native code is about 14 MB per ABI, LiteRT about 4.5 MB. Release builds produce per-ABI APKs (arm64-v8a about 16 MB) plus a universal one, with compressed JNI libs. `-Prwr.abi=<abi>` builds a single ABI without splits and with versionCode `10 × base + n` (n = 1 armeabi-v7a, 2 arm64-v8a, 3 x86_64): that is how F-Droid builds it.
+- **F-Droid.** Every dependency is open source (AndroidX, CameraX, MediaPipe Tasks, LiteRT, OkHttp, ZXing). F-Droid builds and signs the app itself, so its APKs can't update GitHub installs (and vice versa). Store texts and screenshots live in `fastlane/metadata/android/en-US/`.
 
 ## Threat model (server mode)
 

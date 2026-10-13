@@ -1,0 +1,24 @@
+<p>RWR watches through the <b>front camera</b> for people looking at your screen from behind (shoulder surfers). When it sees one, it:</p>
+<ul>
+<li>pops up a card <b>over whatever app you are using</b> with a snapshot of the onlooker (boxed in red, with "laser eyes" showing where they look),</li>
+<li>posts a notification,</li>
+<li>saves a <b>photo or a short video clip</b> (for example 10 s before to 10 s after) to your gallery, and optionally to your own Immich server.</li>
+</ul>
+<p>It runs in the background and can be switched on and off from the <b>Quick Settings</b> panel.</p>
+
+<p><b>Detection</b></p>
+<ul>
+<li><b>Head tracking</b>: a face turned toward the screen counts as looking. Lightest on battery.</li>
+<li><b>Eye tracking</b>: follows the irises and combines them with head pose, so it alerts only when the eyes point at the screen.</li>
+<li>Your own face is recognised and ignored, and faces too far away to read the screen don't count.</li>
+<li>A <b>debug view</b> shows live what the detector sees and why each face counts or not.</li>
+</ul>
+
+<p><b>Private by design</b></p>
+<ul>
+<li>Detection runs <b>on the phone</b>, offline, with bundled open-source models (YuNet and MediaPipe Face Landmarker). No analytics, no ads, no accounts.</li>
+<li>Nothing leaves the phone unless you pair it with <b>your own RWR server</b> (Docker, open source, in the same repository). Then frames go only to your server, over TLS: detection runs there at full frame rate without draining your battery, and snapshots can be uploaded to Immich.</li>
+<li>The camera is always off while the screen is off. Android shows its camera indicator while RWR is watching.</li>
+</ul>
+
+<p>Requires Android 10 or newer and a front camera. The pop-up needs the "Display over other apps" permission.</p>
