@@ -28,7 +28,7 @@ from mediapipe.tasks.python import BaseOptions, vision  # noqa: E402
 CROP_SIZE = 256
 CROP_MARGIN = 1.6
 # Below this face width (pixels in the frame) irises are a few pixels wide: use head pose instead.
-# At or above it, a detection where Face Landmarker finds no face is dropped as a false detection.
+# Any detection where Face Landmarker finds no face is marked verified=False (a false detection).
 MIN_EYE_FACE_PX = 40
 
 
@@ -163,8 +163,8 @@ class Detector:
         for _, f in faces:
             face_w = f.box[2] - f.box[0]
             pts = self._landmarks(img, f.box, landmarker)
-            if pts is None and face_w >= MIN_EYE_FACE_PX:
-                f.verified = False  # big enough for the landmarker, yet no face there: a false detection
+            if pts is None:
+                f.verified = False  # the landmarker finds no face (or another face) there: a false detection
                 verified.append(f)
                 continue
             if pts is not None:

@@ -7,7 +7,7 @@
 services:
   rwr:
     build: .
-    image: ghcr.io/revocx35/rwr-server:${RWR_VERSION:-1.3.1}
+    image: ghcr.io/revocx35/rwr-server:${RWR_VERSION:-1.4.0}
     restart: unless-stopped
     env_file:
       - path: .env

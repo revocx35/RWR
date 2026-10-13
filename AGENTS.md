@@ -139,6 +139,10 @@ adb shell am broadcast -n io.github.revocx35.rwr/.DebugInjectReceiver --es path 
 - Gaze math exists twice, in `GazeEstimator.kt` and `server/rwr_server/gaze.py`. Change both together, and
   keep the synthetic-face tests on both sides identical. The same applies to owner tracking, landmark verification
   and the alert gate (`OnlookerPolicy.kt` and `server/rwr_server/policy.py`).
+- Replaying saved clips: the alert frames have the red box and laser glow burned in, which can break landmark
+  detection on that face. Judge real onlookers on clean frames (or the live view), not on clip frames.
+- Performance: the server logs `device N perf: …` every 30 s (fps in/analysed, KB/s, analysis ms, frame age on
+  arrival). A large frame age means the phone's uplink is the bottleneck.
 - False alerts: the server keeps event clips (`/data/events`) and logs `onlooker alert (N of M faces)` plus each
   client settings change (`ignore_owner=False` explains "1 of 1"). To debug, extract frames with the image's
   ffmpeg (`imageio_ffmpeg.get_ffmpeg_exe()`; headless OpenCV can't read video) and replay them through

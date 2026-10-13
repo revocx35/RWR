@@ -25,7 +25,7 @@ from . import settings as server_settings
 from .clips import Frame, FrameBuffer, encode_mp4
 from .detector import DetectSettings, Detector, FaceResult, annotate, decode_frame, frame_size_ok
 from .events import EventStore
-from .policy import AlertGate, OwnerTracker
+from .policy import MIN_FACE_FRACTION, AlertGate, OwnerTracker
 
 log = logging.getLogger("rwr.stream")
 
@@ -114,12 +114,12 @@ class DeviceStream:
 
 def _role(f: FaceResult, min_face_px: int) -> str:
     """Why a face did or didn't count; same names as FaceRole in the app."""
-    if not f.verified:
-        return "no_face"
     if f.owner:
         return "owner"
     if f.box[2] - f.box[0] < min_face_px:
         return "too_small"
+    if not f.verified:
+        return "no_face"
     return "onlooker" if f.looking else "not_looking"
 
 
@@ -304,6 +304,8 @@ class StreamHub:
             i = s.owner.pick([f.box for f in faces], [f.yaw for f in faces], frame.ts_ms)
             if i is not None:
                 faces[i].owner = True
+        # Too small to be reading the screen: under the admin's pixel minimum or MIN_FACE_FRACTION of the width.
+        min_face_px = max(min_face_px, round(MIN_FACE_FRACTION * img.shape[1]))
         onlookers = [f for f in faces if f.looking and not f.owner and f.box[2] - f.box[0] >= min_face_px]
         if self.viewers.get(s.device_id):
             s.live = {"img": img, "faces": [(f, _role(f, min_face_px)) for f in detections], "mode": det.mode,

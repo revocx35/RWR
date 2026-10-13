@@ -30,7 +30,7 @@ enum class FaceRole(val wire: String, val label: String) {
     TURNED_AWAY("turned_away", "turned away"),
     /** Face Landmarker found no face (or another face) there: a false detection. */
     NO_FACE("no_face", "not a face"),
-    /** Server: narrower than its minimum face size. */
+    /** Narrower than [OnlookerPolicy.MIN_FACE_FRACTION] of the frame (or the server's pixel minimum). */
     TOO_SMALL("too_small", "too small");
 
     companion object {
@@ -59,10 +59,16 @@ object OnlookerPolicy {
     fun candidates(faces: List<FaceBox>, owner: FaceBox?): List<FaceBox> = faces.filter { it !== owner }
 
     /**
-     * A detection at least [MIN_EYE_FACE_PX] wide where Face Landmarker finds no face is a false
-     * detection (a sticker, a pattern) and is dropped. Smaller ones can't be checked and are kept.
+     * Faces narrower than this fraction of the frame width are never onlookers: at about 7% the person is ~2 m
+     * away, too far to read a phone screen, and nearly all false detections (ceiling fixtures, bags, hands,
+     * distant crowds) are that small. Same as MIN_FACE_FRACTION in server/rwr_server/policy.py.
      */
-    fun isVerified(face: FaceBox, landmarksFound: Boolean): Boolean = landmarksFound || face.width < MIN_EYE_FACE_PX
+    const val MIN_FACE_FRACTION = 0.07f
+
+    fun isTooSmall(face: FaceBox, frameWidth: Int): Boolean = face.width < MIN_FACE_FRACTION * frameWidth
+
+    /** A detection where Face Landmarker finds no face (or another face) is a false detection and is dropped. */
+    fun isVerified(@Suppress("UNUSED_PARAMETER") face: FaceBox, landmarksFound: Boolean): Boolean = landmarksFound
 
     /**
      * Face Landmarker runs on an enlarged crop around [face], which can contain a neighbouring face. Landmarks
@@ -143,26 +149,41 @@ class OwnerTracker(private val keepMs: Long = 2000) {
 }
 
 /**
- * Turns per-frame onlooker boxes into alerts: an onlooker must be seen at roughly the same place in
- * [required] of the last [window] analysed frames (false detections flicker and jump around; a person
- * stays put), and alerts are spaced at least the cooldown apart so one person standing behind you does
- * not spam the gallery. Same rules as AlertGate in server/rwr_server/policy.py.
+ * Turns per-frame onlooker boxes into alerts: an onlooker must be seen at about the same place over at least
+ * [minSpanMs], in at least [minRatio] of the analysed frames in that span. Time-based, so it means the same at
+ * 3 fps (phone) and at 15 fps (server). False detections flicker and jump around; a person reading your screen
+ * stays put. Alerts are spaced at least the cooldown apart. Same rules as AlertGate in server/rwr_server/policy.py.
  */
-class AlertGate(private val window: Int = 3, private val required: Int = 2) {
-    private val recent = ArrayDeque<List<FaceBox>>()
+class AlertGate(
+    private val minSpanMs: Long = 500,
+    private val minRatio: Float = 0.6f,
+    private val historyMs: Long = 3000,
+) {
+    private val recent = ArrayDeque<Pair<Long, List<FaceBox>>>()
     private var lastAlertAt = Long.MIN_VALUE
 
     /** Returns true when this frame should raise an alert. */
     fun onFrame(onlookers: List<FaceBox>, nowMs: Long, cooldownMs: Long): Boolean {
-        val confirmed = onlookers.isNotEmpty() &&
-            recent.count { prev -> onlookers.any { a -> prev.any { b -> near(a, b) } } } >= required - 1
-        recent.addLast(onlookers)
-        while (recent.size > window - 1) recent.removeFirst()
-        if (!confirmed) return false
+        recent.addLast(nowMs to onlookers)
+        while (recent.isNotEmpty() && recent.first().first < nowMs - historyMs) recent.removeFirst()
+        if (onlookers.isEmpty() || onlookers.none { confirmed(it, nowMs) }) return false
         if (lastAlertAt != Long.MIN_VALUE && nowMs - lastAlertAt < cooldownMs) return false
         lastAlertAt = nowMs
         recent.clear()
         return true
+    }
+
+    private fun confirmed(box: FaceBox, nowMs: Long): Boolean {
+        var hits = 0
+        var total = 0
+        for ((ts, boxes) in recent.reversed()) {  // newest first
+            total++
+            if (boxes.any { near(box, it) }) {
+                hits++
+                if (nowMs - ts >= minSpanMs && hits >= 2 && hits.toFloat() / total >= minRatio) return true
+            }
+        }
+        return false
     }
 
     fun reset() {

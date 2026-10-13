@@ -185,9 +185,9 @@ def test_stream_alerts_on_onlooker(admin, app, client):
         assert json.loads(ws.receive_text())["type"] == "ready"
         ws.send_text(json.dumps({"type": "hello", "settings": {"mode": "eye", "media": "photo", "cooldown_sec": 3}}))
         alert = None
-        for seq in range(1, 8):
+        for seq in range(1, 12):   # 0.9 s: the onlooker must stay at least half a second
             ws.send_bytes(_frame(seq))
-            time.sleep(0.06)
+            time.sleep(0.09)
         for _ in range(3):
             msg = json.loads(ws.receive_text())
             if msg["type"] == "alert":
@@ -221,8 +221,10 @@ def test_stream_debug_messages_only_when_asked(admin, app, client):
         msg = json.loads(ws.receive_text())
         assert msg["type"] == "debug" and msg["seq"] == 1 and msg["mode"] == "head"
         assert [f["role"] for f in msg["faces"]] == ["owner", "onlooker"]
-        # Turned off again: the next frame (the onlooker's second) brings the alert, and no debug message.
+        # Turned off again: the following frames bring the alert, and no debug message.
         ws.send_text(json.dumps({"type": "settings", "settings": {"mode": "head", "debug": False, "cooldown_sec": 600}}))
         time.sleep(0.1)
-        ws.send_bytes(_frame(2))
+        for seq in range(2, 10):
+            ws.send_bytes(_frame(seq))
+            time.sleep(0.09)
         assert json.loads(ws.receive_text())["type"] == "alert"

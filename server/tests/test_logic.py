@@ -65,16 +65,32 @@ ONLOOKER = (300, 40, 360, 110)
 def test_alert_gate():
     g = AlertGate()
     assert not g.on_frame([ONLOOKER], 0, 1000)
-    assert g.on_frame([ONLOOKER], 100, 1000)
-    assert not g.on_frame([ONLOOKER], 200, 1000)
-    assert not g.on_frame([ONLOOKER], 300, 1000)   # cooldown
-    assert g.on_frame([ONLOOKER], 1500, 1000)
+    assert not g.on_frame([ONLOOKER], 330, 1000)     # seen for 0.33 s: not yet
+    assert g.on_frame([ONLOOKER], 660, 1000)         # 0.66 s at the same place: alert
+    assert not g.on_frame([ONLOOKER], 1000, 1000)
+    assert not g.on_frame([ONLOOKER], 1400, 1000)    # cooldown (and the gate starts over)
+    assert g.on_frame([ONLOOKER], 2200, 1000)
+
+
+def test_alert_gate_is_time_based_not_frame_based():
+    # At 15 fps (server), 3 frames in a row (0.13 s) used to be enough; a phantom like that must not alert.
+    g = AlertGate()
+    assert not any(g.on_frame([ONLOOKER], t, 0) for t in (0, 66, 133))
+    # A person who stays half a second does, even with a few missed frames.
+    g = AlertGate()
+    frames = [[ONLOOKER] if i % 4 != 1 else [] for i in range(9)]   # 75% hits
+    results = [g.on_frame(b, i * 66, 0) for i, b in enumerate(frames)]
+    assert results[-1] and not any(results[:7])
+    # Slow network (0.5 fps): two sightings 2 s apart are enough.
+    g = AlertGate()
+    assert not g.on_frame([ONLOOKER], 0, 0) and g.on_frame([ONLOOKER], 2000, 0)
 
 
 def test_alert_gate_follows_a_moving_onlooker_but_ignores_flicker():
     g = AlertGate()
     assert not g.on_frame([ONLOOKER], 0, 0)
-    assert g.on_frame([(320, 50, 380, 120)], 100, 0)          # moved a bit: same person
+    assert not g.on_frame([(310, 45, 370, 115)], 300, 0)
+    assert g.on_frame([(320, 50, 380, 120)], 600, 0)          # moved a bit: same person
     # False detections in different places every frame (car ceiling sticker, seat, ...) never alert.
     flicker = [[(77, 13, 139, 88)], [], [(589, 878, 658, 960)], [(3, 2, 102, 116)], [], [(539, 901, 592, 960)]]
     g = AlertGate()

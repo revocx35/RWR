@@ -363,11 +363,13 @@ class WatcherService : LifecycleService() {
         .getOrNull()?.also { eyeTracker = it }
 
     /**
-     * Decides one non-owner face. Face Landmarker runs only where it matters: in head mode only on faces that
+     * Decides one non-owner face. Faces too small to be reading the screen are skipped first
+     * ([OnlookerPolicy.isTooSmall]). Face Landmarker runs only where it matters: in head mode only on faces that
      * would alert (so it stays idle while only the owner is in view), in eye mode on faces turned roughly toward
      * the camera. A detection where it finds no face is dropped (see [OnlookerPolicy.isVerified]).
      */
     private fun judge(upright: Bitmap, face: FaceBox): FaceVerdict {
+        if (OnlookerPolicy.isTooSmall(face, upright.width)) return FaceVerdict(face, FaceRole.TOO_SMALL)
         val eye = prefs.detectionMode == DetectionMode.EYE
         val maxHead = prefs.maxHeadAngle
         if (!eye && !OnlookerPolicy.isLookingAtCamera(face, maxHead)) return FaceVerdict(face, FaceRole.NOT_LOOKING)

@@ -39,7 +39,7 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 | `detection/FaceFinder.kt` | ML Kit face detection (fast mode, min face 5%, bundled model): face boxes and head Euler angles. |
 | `detection/EyeTracker.kt` | MediaPipe Face Landmarker (478 points including irises), run on each candidate face: square crop, 1.6× margin, scaled to 256 px, so small faces behind you get enough pixels. Points are mapped back to frame pixels. |
 | `detection/GazeEstimator.kt` | Pure Kotlin, unit-tested; mirrors `server/rwr_server/gaze.py`. Head yaw/pitch from the 3D face plane (cheeks × forehead–chin); eye yaw/pitch from the iris offset inside each eye (`asin(1.25·offset/half-width)`); gaze = head + eyes. Eyes closed if lid gap / width < 0.10. Also builds the laser rays. |
-| `detection/OnlookerPolicy.kt` | Pure Kotlin, unit-tested. `OwnerTracker` picks the owner (see "False-alert defences" below). Head mode: keep non-owner faces with \|yaw\|,\|pitch\| ≤ angle. Eye mode: prefilter at 60°, then the gaze decides; it falls back to the head rule for faces narrower than 40 px. `isVerified`/`landmarksMatch`: drop detections ≥ 40 px where Face Landmarker finds no face (or a different one). `AlertGate`: the onlooker at about the same place in 2 of the last 3 analysed frames, plus a cooldown. |
+| `detection/OnlookerPolicy.kt` | Pure Kotlin, unit-tested. `OwnerTracker` picks the owner (see "False-alert defences" below). Head mode: keep non-owner faces with \|yaw\|,\|pitch\| ≤ angle. Eye mode: prefilter at 60°, then the gaze decides; it falls back to the head rule for faces narrower than 40 px. `isTooSmall`: faces narrower than 7% of the frame width (≈ 2 m away) are never onlookers. `isVerified`/`landmarksMatch`: drop any candidate where Face Landmarker finds no face (or a different one). `AlertGate`: the onlooker at about the same place for ≥ 0.5 s in ≥ 60% of the analysed frames (time-based), plus a cooldown. |
 | `detection/CameraTuning.kt` | Maps the frame-rate setting onto a supported AE FPS range. |
 | `media/FrameRing.kt` | Rolling buffer of `EncodedFrame` (seq, timestamp, JPEG, rotation), bounded by seconds and 48 MB. `ClipTiming` resamples to constant frame rate, the same way as the server's `clips.resample`. |
 | `media/FrameCodec.kt` | YUV_420_888 → NV21 → `YuvImage.compressToJpeg`, which is native and much cheaper than going through a Bitmap. Also decodes a frame back to upright + mirrored. |
@@ -114,8 +114,13 @@ Coordinates are in the upright, mirrored frame, which phone and server build ide
   3. *The landmarker reporting a neighbouring face.* It runs on a 1.6× crop around the detection, which can contain
      another face (the owner's); landmarks are used only if their bounding box overlaps the detection
      (IoU ≥ 0.3).
-  Plus `AlertGate` now requires the onlooker at about the same place (centres ≤ one face size apart) in 2 of 3
-  frames, so faces that flicker in different places never alert.
+  4. *Tiny phantoms (v1.4.0):* ceiling fixtures, bags, hands and distant crowds detected as 10–25 px "faces"
+     (480 px frame), too small for the old ≥ 40 px landmark check. Faces narrower than 7% of the frame width
+     (`MIN_FACE_FRACTION`, about 2 m away: too far to read a phone) are never onlookers, and every remaining
+     candidate must pass the landmark check (it works down to ~26 px).
+  `AlertGate` requires the onlooker at about the same place (centres ≤ one face size apart) for at least 0.5 s in
+  ≥ 60% of the frames. It used to count 2 of 3 frames, which is 0.66 s on the phone (3 fps) but only 0.15 s on the
+  server (13–15 fps), so short phantoms alerted in server mode.
 - **Two detection modes.**
   - *Head*: ML Kit Euler angles. Cheapest.
   - *Eye*: iris gaze. It alerts only when the eyes point at the screen, so it also catches someone who turns their head away but keeps their eyes on your screen. It ignores someone facing the camera but looking elsewhere. On the test photos it rejected a face at 22° gaze that head mode accepted.

@@ -73,29 +73,58 @@ class OnlookerPolicyTest {
         assertTrue(OnlookerPolicy.landmarksMatch(FaceBox(214, 292, 447, 524, 3.5f, 0f), ownerMesh))
     }
 
-    @Test fun bigFaceWithoutLandmarksIsDropped() {
+    @Test fun faceWithoutLandmarksIsDropped() {
         assertFalse(OnlookerPolicy.isVerified(face(80), landmarksFound = false))
         assertTrue(OnlookerPolicy.isVerified(face(80), landmarksFound = true))
-        assertTrue(OnlookerPolicy.isVerified(face(20), landmarksFound = false))  // too small to check
+        assertFalse(OnlookerPolicy.isVerified(face(36), landmarksFound = false))
+    }
+
+    @Test fun facesTooFarAwayAreTooSmall() {
+        // Seen on real clips: a ceiling fixture and distant crowds as ~20 px "faces" in a 480 px wide frame.
+        assertTrue(OnlookerPolicy.isTooSmall(face(20), frameWidth = 480))
+        assertTrue(OnlookerPolicy.isTooSmall(face(33), frameWidth = 480))
+        assertFalse(OnlookerPolicy.isTooSmall(face(45), frameWidth = 480))   // a person in the seat behind
+        assertTrue(OnlookerPolicy.isTooSmall(face(45), frameWidth = 720))
     }
 
     private val onlooker = listOf(box(300, 40, 360, 110))
 
-    @Test fun gateNeedsTwoOfThreeFrames() {
+    @Test fun gateNeedsHalfASecond() {
         val gate = AlertGate()
         assertFalse(gate.onFrame(onlooker, 0, 10_000))
-        assertFalse(gate.onFrame(emptyList(), 300, 10_000))
-        assertTrue(gate.onFrame(onlooker, 600, 10_000))
+        assertFalse(gate.onFrame(onlooker, 330, 10_000))   // 0.33 s: not yet
+        assertTrue(gate.onFrame(onlooker, 660, 10_000))
+    }
+
+    @Test fun gateToleratesAMissedFrame() {
+        val gate = AlertGate()
+        assertFalse(gate.onFrame(onlooker, 0, 10_000))
+        assertFalse(gate.onFrame(emptyList(), 330, 10_000))
+        assertTrue(gate.onFrame(onlooker, 660, 10_000))   // 2 of 3 frames = 67% over 0.66 s
     }
 
     @Test fun gateRespectsCooldown() {
         val gate = AlertGate()
         gate.onFrame(onlooker, 0, 10_000)
-        assertTrue(gate.onFrame(onlooker, 300, 10_000))
-        gate.onFrame(onlooker, 600, 10_000)
+        gate.onFrame(onlooker, 300, 10_000)
+        assertTrue(gate.onFrame(onlooker, 600, 10_000))
         assertFalse(gate.onFrame(onlooker, 900, 10_000))
+        assertFalse(gate.onFrame(onlooker, 1500, 10_000))
         gate.onFrame(onlooker, 10_000, 10_000)
-        assertTrue(gate.onFrame(onlooker, 10_400, 10_000))
+        gate.onFrame(onlooker, 10_300, 10_000)
+        assertTrue(gate.onFrame(onlooker, 10_600, 10_000))
+    }
+
+    @Test fun gateIsTimeBasedNotFrameBased() {
+        // Same cases as test_alert_gate_is_time_based_not_frame_based on the server.
+        val g = AlertGate()
+        assertFalse(listOf(0L, 66L, 133L).any { g.onFrame(onlooker, it, 0) })   // 3 frames at 15 fps
+        val g2 = AlertGate()
+        val results = (0 until 9).map { i -> g2.onFrame(if (i % 4 != 1) onlooker else emptyList(), i * 66L, 0) }
+        assertTrue(results.last() && results.take(7).none { it })
+        val g3 = AlertGate()
+        assertFalse(g3.onFrame(onlooker, 0, 0))
+        assertTrue(g3.onFrame(onlooker, 2000, 0))   // slow network: two sightings 2 s apart
     }
 
     @Test fun gateIgnoresIsolatedFalsePositives() {
@@ -110,14 +139,13 @@ class OnlookerPolicyTest {
     @Test fun gateFollowsAMovingOnlookerButNotJumpingFalseFaces() {
         val gate = AlertGate()
         assertFalse(gate.onFrame(onlooker, 0, 0))
-        assertTrue(gate.onFrame(listOf(box(320, 50, 380, 120)), 300, 0))
-        // False detections in a different place each frame (seen on a car ceiling sticker and a seat).
-        // Same sequence as test_alert_gate_follows_a_moving_onlooker_but_ignores_flicker on the server.
+        assertFalse(gate.onFrame(listOf(box(310, 45, 370, 115)), 300, 0))
+        assertTrue(gate.onFrame(listOf(box(320, 50, 380, 120)), 600, 0))
         val flicker = listOf(
             listOf(box(77, 13, 139, 88)), emptyList(), listOf(box(589, 878, 658, 960)),
             listOf(box(3, 2, 102, 116)), emptyList(), listOf(box(539, 901, 592, 960)),
         )
         val g2 = AlertGate()
-        flicker.forEachIndexed { i, b -> assertFalse(g2.onFrame(b, i * 300L, 0)) }
+        flicker.forEachIndexed { i, b -> assertFalse(g2.onFrame(b, i * 100L, 0)) }
     }
 }

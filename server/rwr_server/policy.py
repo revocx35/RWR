@@ -32,6 +32,17 @@ def near(a: Box, b: Box) -> bool:
     return dx * dx + dy * dy <= size * size
 
 
+# Faces narrower than this fraction of the frame width are never onlookers: at about 7% the person is ~2 m away,
+# too far to read a phone screen, and nearly all false detections (ceiling fixtures, bags, hands, distant crowds)
+# are that small. Same value as OnlookerPolicy.MIN_FACE_FRACTION in the app.
+MIN_FACE_FRACTION = 0.07
+# Alert gate: an onlooker must be seen at about the same place over at least GATE_MIN_SPAN_MS, in at least
+# GATE_MIN_RATIO of the analysed frames in that span. Time-based, so it means the same at 3 fps (phone) and at
+# 15 fps (server); counting frames made it 0.15 s on the server.
+GATE_MIN_SPAN_MS = 500
+GATE_MIN_RATIO = 0.6
+GATE_HISTORY_MS = 3000
+
 # Face Landmarker runs on an enlarged crop around each detection; if it reports a face covering less than this
 # of the detection, it found a different (neighbouring) face in the crop and the result is not used.
 LANDMARKS_MIN_IOU = 0.3
@@ -76,28 +87,38 @@ def _area(b: Box) -> int:
 
 
 class AlertGate:
-    """An onlooker must be seen at roughly the same place in [required] of the last [window] analysed
-    frames (false detections flicker and jump around; a person stays put), and alerts are spaced at least
-    the cooldown apart."""
+    """Turns per-frame onlooker boxes into alerts (see GATE_MIN_SPAN_MS); alerts are spaced at least the cooldown
+    apart. False detections flicker and jump around; a person who reads your screen stays put."""
 
-    def __init__(self, window: int = 3, required: int = 2):
-        self.window = window
-        self.required = required
-        self._recent: collections.deque[list[Box]] = collections.deque(maxlen=window - 1)
+    def __init__(self, min_span_ms: int = GATE_MIN_SPAN_MS, min_ratio: float = GATE_MIN_RATIO,
+                 history_ms: int = GATE_HISTORY_MS):
+        self.min_span_ms = min_span_ms
+        self.min_ratio = min_ratio
+        self.history_ms = history_ms
+        self._recent: collections.deque[tuple[int, list[Box]]] = collections.deque()
         self._last_alert: int | None = None
 
     def on_frame(self, onlookers: list[Box], now_ms: int, cooldown_ms: int) -> bool:
-        confirmed = bool(onlookers) and sum(
-            1 for prev in self._recent if any(near(a, b) for a in onlookers for b in prev)
-        ) >= self.required - 1
-        self._recent.append(list(onlookers))
-        if not confirmed:
+        self._recent.append((now_ms, list(onlookers)))
+        while self._recent and self._recent[0][0] < now_ms - self.history_ms:
+            self._recent.popleft()
+        if not onlookers or not any(self._confirmed(a, now_ms) for a in onlookers):
             return False
         if self._last_alert is not None and now_ms - self._last_alert < cooldown_ms:
             return False
         self._last_alert = now_ms
         self._recent.clear()
         return True
+
+    def _confirmed(self, box: Box, now_ms: int) -> bool:
+        hits = total = 0
+        for ts, boxes in reversed(self._recent):   # newest first
+            total += 1
+            if any(near(box, b) for b in boxes):
+                hits += 1
+                if now_ms - ts >= self.min_span_ms and hits >= 2 and hits / total >= self.min_ratio:
+                    return True
+        return False
 
     def reset(self) -> None:
         self._recent.clear()

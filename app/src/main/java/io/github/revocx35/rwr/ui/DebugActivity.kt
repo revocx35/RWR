@@ -13,6 +13,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -159,7 +161,7 @@ class DebugActivity : ComponentActivity() {
             Legend()
             f?.verdicts?.forEachIndexed { i, v -> FaceCard(i + 1, v) }
             Text(
-                "The alert also needs the same person in about the same place in 2 of 3 analysed frames, and respects " +
+                "The alert also needs the same person in about the same place for at least half a second, and respects " +
                     "the minimum time between alerts. While this screen is open the pop-up is held back; the " +
                     "notification still appears.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -233,10 +235,12 @@ class DebugActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalLayoutApi::class)
     @Composable
     private fun Legend() {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf(FaceRole.OWNER, FaceRole.ONLOOKER, FaceRole.NOT_LOOKING, FaceRole.TURNED_AWAY, FaceRole.NO_FACE).forEach {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf(FaceRole.OWNER, FaceRole.ONLOOKER, FaceRole.NOT_LOOKING, FaceRole.TURNED_AWAY, FaceRole.NO_FACE,
+                FaceRole.TOO_SMALL).forEach {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(10.dp).background(roleColor(it)))
                     Text(" ${it.label}", style = MaterialTheme.typography.labelSmall)
@@ -272,7 +276,8 @@ class DebugActivity : ComponentActivity() {
             else "Head turned away more than the allowed angle."
         FaceRole.TURNED_AWAY -> "Head turned more than ${OnlookerPolicy.EYE_PREFILTER_ANGLE.roundToInt()}°, so the eyes weren't checked."
         FaceRole.NO_FACE -> "The landmark model found no face here (or a different face): ignored as a false detection."
-        FaceRole.TOO_SMALL -> "Smaller than the server's minimum face size."
+        FaceRole.TOO_SMALL -> "Too small (narrower than ${(OnlookerPolicy.MIN_FACE_FRACTION * 100).roundToInt()}% of the " +
+            "frame): about 2 m or more away, too far to read your screen. Most false detections are this small."
     }
 
     private fun roleColor(role: FaceRole) = when (role) {
