@@ -25,23 +25,39 @@ enum class DetectionMode { HEAD, EYE }
  * Decides which faces in a frame count as onlookers. Pure Kotlin so it is unit-tested on the JVM.
  *
  * The front camera faces the same way as the screen, so anyone it sees with their head turned
- * towards it is looking (roughly) at the screen. The phone's owner is normally the largest,
- * closest face, so with [ignoreOwner] that face is never an onlooker.
+ * towards it is looking (roughly) at the screen. The phone's owner (picked by [OwnerTracker]) is
+ * never an onlooker.
  */
 object OnlookerPolicy {
-    fun onlookers(faces: List<FaceBox>, ignoreOwner: Boolean, maxHeadAngle: Float): List<FaceBox> {
-        val owner = if (ignoreOwner) faces.maxByOrNull { it.area } else null
-        return faces.filter { it !== owner && isLookingAtCamera(it, maxHeadAngle) }
-    }
+    fun onlookers(faces: List<FaceBox>, owner: FaceBox?, maxHeadAngle: Float): List<FaceBox> =
+        faces.filter { it !== owner && isLookingAtCamera(it, maxHeadAngle) }
 
     fun isLookingAtCamera(face: FaceBox, maxHeadAngle: Float): Boolean =
         abs(face.yaw) <= maxHeadAngle && abs(face.pitch) <= maxHeadAngle
 
     /** Faces that may be onlookers, before the per-face eye check. */
-    fun candidates(faces: List<FaceBox>, ignoreOwner: Boolean): List<FaceBox> {
-        val owner = if (ignoreOwner) faces.maxByOrNull { it.area } else null
-        return faces.filter { it !== owner }
+    fun candidates(faces: List<FaceBox>, owner: FaceBox?): List<FaceBox> = faces.filter { it !== owner }
+
+    /**
+     * A detection at least [MIN_EYE_FACE_PX] wide where Face Landmarker finds no face is a false
+     * detection (a sticker, a pattern) and is dropped. Smaller ones can't be checked and are kept.
+     */
+    fun isVerified(face: FaceBox, landmarksFound: Boolean): Boolean = landmarksFound || face.width < MIN_EYE_FACE_PX
+
+    /**
+     * Face Landmarker runs on an enlarged crop around [face], which can contain a neighbouring face. Landmarks
+     * ([pts]: x, y, z per point, frame pixels) only belong to [face] if they cover it well enough.
+     */
+    fun landmarksMatch(face: FaceBox, pts: FloatArray): Boolean {
+        var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+        for (i in pts.indices step 3) {
+            l = minOf(l, pts[i]); r = maxOf(r, pts[i]); t = minOf(t, pts[i + 1]); b = maxOf(b, pts[i + 1])
+        }
+        return iou(face, FaceBox(l.toInt(), t.toInt(), r.toInt(), b.toInt(), 0f, 0f)) >= LANDMARKS_MIN_IOU
     }
+
+    /** Same as LANDMARKS_MIN_IOU in server/rwr_server/policy.py. */
+    const val LANDMARKS_MIN_IOU = 0.3f
 
     /** Eye tracking only runs on faces turned at most this far (beyond it the eyes can't reach the screen). */
     const val EYE_PREFILTER_ANGLE = 60f
@@ -57,20 +73,72 @@ object OnlookerPolicy {
         else isLookingAtCamera(face, maxHeadAngle)
 }
 
+/** Intersection over union of two boxes. */
+fun iou(a: FaceBox, b: FaceBox): Float {
+    val iw = minOf(a.right, b.right) - maxOf(a.left, b.left)
+    val ih = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+    if (iw <= 0 || ih <= 0) return 0f
+    val inter = iw.toLong() * ih
+    val union = a.area.toLong() + b.area - inter
+    return if (union > 0) inter.toFloat() / union else 0f
+}
+
+/** Same person in consecutive frames: centres at most one face size apart. */
+fun near(a: FaceBox, b: FaceBox): Boolean {
+    val dx = (a.left + a.right) / 2f - (b.left + b.right) / 2f
+    val dy = (a.top + a.bottom) / 2f - (b.top + b.bottom) / 2f
+    val size = maxOf(maxOf(a.width, a.bottom - a.top), maxOf(b.width, b.bottom - b.top)).toFloat()
+    return dx * dx + dy * dy <= size * size
+}
+
 /**
- * Turns per-frame "onlooker seen" results into alerts: an onlooker must appear in [required] of the
- * last [window] analysed frames (filters single-frame false positives), and alerts are spaced at
- * least the cooldown apart so one person standing behind you does not spam the gallery.
+ * The owner is the largest face turned toward the camera when watching starts, then whichever face keeps
+ * overlapping them (a half face at the frame edge, turned away, can be bigger than the owner's). A
+ * momentary bigger false detection (a finger or hand close to the lens) can't take the owner's place,
+ * which would turn the owner into an "onlooker". Same rules as OwnerTracker in server/rwr_server/policy.py.
+ */
+class OwnerTracker(private val keepMs: Long = 2000) {
+    private var last: FaceBox? = null
+    private var lastAt = 0L
+
+    fun pick(faces: List<FaceBox>, nowMs: Long): FaceBox? {
+        if (faces.isEmpty()) return null
+        val prev = last?.takeIf { nowMs - lastAt <= keepMs }
+        val tracked = prev?.let { p -> faces.maxBy { iou(it, p) }.takeIf { iou(it, p) >= MIN_IOU } }
+        val owner = tracked ?: (faces.filter { abs(it.yaw) <= MAX_YAW }.ifEmpty { faces }).maxBy { it.area }
+        last = owner
+        lastAt = nowMs
+        return owner
+    }
+
+    fun reset() {
+        last = null
+    }
+
+    companion object {
+        const val MIN_IOU = 0.3f
+        /** Not checking pitch: phones are often held low, so the owner looks down at the camera. */
+        const val MAX_YAW = 35f
+    }
+}
+
+/**
+ * Turns per-frame onlooker boxes into alerts: an onlooker must be seen at roughly the same place in
+ * [required] of the last [window] analysed frames (false detections flicker and jump around; a person
+ * stays put), and alerts are spaced at least the cooldown apart so one person standing behind you does
+ * not spam the gallery. Same rules as AlertGate in server/rwr_server/policy.py.
  */
 class AlertGate(private val window: Int = 3, private val required: Int = 2) {
-    private val recent = ArrayDeque<Boolean>()
+    private val recent = ArrayDeque<List<FaceBox>>()
     private var lastAlertAt = Long.MIN_VALUE
 
     /** Returns true when this frame should raise an alert. */
-    fun onFrame(onlookerSeen: Boolean, nowMs: Long, cooldownMs: Long): Boolean {
-        recent.addLast(onlookerSeen)
-        while (recent.size > window) recent.removeFirst()
-        if (recent.count { it } < required) return false
+    fun onFrame(onlookers: List<FaceBox>, nowMs: Long, cooldownMs: Long): Boolean {
+        val confirmed = onlookers.isNotEmpty() &&
+            recent.count { prev -> onlookers.any { a -> prev.any { b -> near(a, b) } } } >= required - 1
+        recent.addLast(onlookers)
+        while (recent.size > window - 1) recent.removeFirst()
+        if (!confirmed) return false
         if (lastAlertAt != Long.MIN_VALUE && nowMs - lastAlertAt < cooldownMs) return false
         lastAlertAt = nowMs
         recent.clear()

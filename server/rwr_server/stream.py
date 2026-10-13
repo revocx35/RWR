@@ -24,7 +24,7 @@ from . import settings as server_settings
 from .clips import Frame, FrameBuffer, encode_mp4
 from .detector import DetectSettings, Detector, FaceResult, annotate, decode_frame
 from .events import EventStore
-from .policy import AlertGate
+from .policy import AlertGate, OwnerTracker
 
 log = logging.getLogger("rwr.stream")
 
@@ -88,6 +88,7 @@ class DeviceStream:
     settings: ClientSettings = field(default_factory=ClientSettings)
     buffer: FrameBuffer = field(default_factory=lambda: FrameBuffer(12))
     gate: AlertGate = field(default_factory=AlertGate)
+    owner: OwnerTracker = field(default_factory=OwnerTracker)
     busy: bool = False
     pending: Frame | None = None
     clip: _Clip | None = None
@@ -202,8 +203,8 @@ class StreamHub:
             while frame is not None and not s.closed:
                 cs = s.settings
                 srv = server_settings.load(self.db)
-                det = DetectSettings(cs.mode, cs.ignore_owner, cs.max_head_angle, cs.max_gaze_angle)
-                result = await loop.run_in_executor(self.pool, self._analyse, frame, det, srv["min_face_px"])
+                det = DetectSettings(cs.mode, cs.max_head_angle, cs.max_gaze_angle)
+                result = await loop.run_in_executor(self.pool, self._analyse, s, frame, det, srv["min_face_px"])
                 s.analysed += 1
                 if result is not None:
                     await self._after_analysis(s, frame, *result)
@@ -213,11 +214,18 @@ class StreamHub:
         finally:
             s.busy = False
 
-    def _analyse(self, frame: Frame, det: DetectSettings, min_face_px: int):
+    def _analyse(self, s: DeviceStream, frame: Frame, det: DetectSettings, min_face_px: int):
+        """Runs in the detector pool; frames of one stream are analysed one at a time (see _analyse_loop)."""
         img = decode_frame(frame.jpeg, frame.rotation, frame.mirror)
         if img is None:
             return None
         faces = self.detector.analyze(img, det)
+        for f in faces:
+            f.owner = False
+        if s.settings.ignore_owner:
+            i = s.owner.pick([f.box for f in faces], [f.yaw for f in faces], frame.ts_ms)
+            if i is not None:
+                faces[i].owner = True
         onlookers = [f for f in faces if f.looking and not f.owner and f.box[2] - f.box[0] >= min_face_px]
         return img, faces, onlookers
 
@@ -229,7 +237,7 @@ class StreamHub:
                     del s.boxes_by_seq[k]
         if s.clip is not None:
             return  # still recording the previous alert's clip
-        if not s.gate.on_frame(bool(onlookers), int(time.time() * 1000), s.settings.cooldown_sec * 1000):
+        if not s.gate.on_frame([f.box for f in onlookers], int(time.time() * 1000), s.settings.cooldown_sec * 1000):
             return
         h, w = img.shape[:2]
         log.info("device %s: onlooker alert (%d of %d faces, %s mode)", s.device_id, len(onlookers), len(faces),

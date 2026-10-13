@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from . import gaze as gz
+from .policy import landmarks_match
 
 # mediapipe's package __init__ eagerly imports its audio and drawing helpers, which pull in PortAudio and
 # matplotlib. The server uses neither, so they are not installed; empty stand-ins satisfy the imports.
@@ -27,13 +28,13 @@ from mediapipe.tasks.python import BaseOptions, vision  # noqa: E402
 CROP_SIZE = 256
 CROP_MARGIN = 1.6
 # Below this face width (pixels in the frame) irises are a few pixels wide: use head pose instead.
+# At or above it, a detection where Face Landmarker finds no face is dropped as a false detection.
 MIN_EYE_FACE_PX = 40
 
 
 @dataclass
 class DetectSettings:
     mode: str = "head"            # "head" or "eye"
-    ignore_owner: bool = True
     max_head_angle: float = 25.0
     max_gaze_angle: float = 12.0
 
@@ -98,6 +99,8 @@ class Detector:
         return loc.yunet, loc.landmarker
 
     def analyze(self, img: np.ndarray, s: DetectSettings) -> list[FaceResult]:
+        """All faces in [img] with pose, gaze and the looking decision. Picking the owner is up to the caller
+        (it needs the previous frames, see policy.OwnerTracker)."""
         yunet, landmarker = self._models()
         h, w = img.shape[:2]
         yunet.setInputSize((w, h))
@@ -108,22 +111,22 @@ class Detector:
             box = (int(max(0, x)), int(max(0, y)), int(min(w, x + bw)), int(min(h, y + bh)))
             yaw, pitch = _pose_from_five_points(row[4:14].reshape(5, 2))
             faces.append((row, FaceResult(box=box, score=float(row[14]), yaw=yaw, pitch=pitch)))
-        if s.ignore_owner and faces:
-            max(faces, key=lambda f: f[1].area)[1].owner = True
+        verified: list[FaceResult] = []
         for _, f in faces:
-            if f.owner:
-                continue
+            face_w = f.box[2] - f.box[0]
             pts = self._landmarks(img, f.box, landmarker)
+            if pts is None and face_w >= MIN_EYE_FACE_PX:
+                continue  # big enough for the landmarker, yet no face there: a false detection
             if pts is not None:
                 f.yaw, f.pitch = gz.head_pose(pts)
                 f.gaze = gz.estimate(pts)
-            face_w = f.box[2] - f.box[0]
             if s.mode == "eye" and f.gaze is not None and face_w >= MIN_EYE_FACE_PX:
                 f.looking = gz.is_looking(f.gaze, s.max_gaze_angle)
                 f.rays = gz.laser_rays(f.gaze, face_w * 0.8)
             else:
                 f.looking = abs(f.yaw) <= s.max_head_angle and abs(f.pitch) <= s.max_head_angle
-        return [f for _, f in faces]
+            verified.append(f)
+        return verified
 
     @staticmethod
     def _landmarks(img: np.ndarray, box, landmarker) -> np.ndarray | None:
@@ -145,7 +148,9 @@ class Detector:
         if not res.face_landmarks:
             return None
         lm = res.face_landmarks[0]
-        return np.array([[x0 + p.x * side, y0 + p.y * side, p.z * side] for p in lm], dtype=np.float64)
+        pts = np.array([[x0 + p.x * side, y0 + p.y * side, p.z * side] for p in lm], dtype=np.float64)
+        # The crop can contain a neighbouring face; only accept landmarks of the face that was detected.
+        return pts if landmarks_match(box, pts[:, 0], pts[:, 1]) else None
 
 
 def _pose_from_five_points(p: np.ndarray) -> tuple[float, float]:

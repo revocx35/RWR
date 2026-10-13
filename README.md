@@ -67,7 +67,7 @@ Locked out? `docker compose exec rwr python -m rwr_server.admin reset-password`
 3. Tap **Start watching**, or add the Quick Settings toggle.
 
 Settings:
-- **Detection:** head or eye tracking, angles, ignore your own face (the largest face), minimum time
+- **Detection:** head or eye tracking, angles, ignore your own face (the largest face turned toward the camera, followed as you move), minimum time
   between alerts.
 - **Snapshots:** pop-up on/off; photo or video clip with adjustable seconds before and after (0–30 each);
   save to Gallery / Immich / Both. Immich needs a paired server.

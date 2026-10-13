@@ -76,6 +76,7 @@ class WatcherService : LifecycleService() {
     private lateinit var prefs: Prefs
     private lateinit var presenter: AlertPresenter
     private val gate = AlertGate()
+    private val owner = OwnerTracker()
     private var finder: FaceFinder? = null
     private var eyeTracker: EyeTracker? = null
     private var eyeTrackerFailed = false
@@ -212,7 +213,7 @@ class WatcherService : LifecycleService() {
             try {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
-                gate.reset()
+                analysisExecutor.execute { gate.reset(); owner.reset() }
                 Log.i(TAG, "camera bound: ${analysis.resolutionInfo?.resolution}, fps=$appliedFpsRange, " +
                     if (prefs.efficientConversion) "YUV" else "RGBA")
                 startStreamIfNeeded()
@@ -325,41 +326,64 @@ class WatcherService : LifecycleService() {
         val faces = runCatching { finder?.find(upright) }
             .onFailure { Log.w(TAG, "face detection failed", it) }
             .getOrNull() ?: return
+        val ownerFace = if (prefs.ignoreOwner) owner.pick(faces, now) else null
         val onlookers = when (prefs.detectionMode) {
-            DetectionMode.HEAD -> OnlookerPolicy.onlookers(faces, prefs.ignoreOwner, prefs.maxHeadAngle)
-            DetectionMode.EYE -> eyeOnlookers(upright, faces)
+            DetectionMode.HEAD -> OnlookerPolicy.onlookers(faces, ownerFace, prefs.maxHeadAngle)
+                .filter { face -> verify(upright, face) { true } }
+            DetectionMode.EYE -> eyeOnlookers(upright, faces, ownerFace)
         }
         if (BuildConfig.DEBUG && faces.isNotEmpty()) {
             Log.d(TAG, "frame ${upright.width}x${upright.height}: faces=$faces onlookers=${onlookers.size}")
         }
         if (seq != null && onlookers.isNotEmpty()) rememberBoxes(seq, onlookers)
         if (clip != null) return  // still recording the previous alert's clip
-        if (!gate.onFrame(onlookers.isNotEmpty(), now, prefs.cooldownSec * 1000L)) return
+        if (!gate.onFrame(onlookers, now, prefs.cooldownSec * 1000L)) return
         Log.i(TAG, "onlooker alert: ${onlookers.size} of ${faces.size} faces (${prefs.detectionMode})")
         raiseAlert(upright, onlookers, now, serverDetected = false)
     }
 
+    /** Created on first use; null if MediaPipe can't load (then faces are not verified and eye mode uses head pose). */
+    private fun landmarker(): EyeTracker? = eyeTracker ?: if (eyeTrackerFailed) null else runCatching { EyeTracker(this) }
+        .onFailure { eyeTrackerFailed = true; Log.e(TAG, "eye tracker unavailable, using head pose", it) }
+        .getOrNull()?.also { eyeTracker = it }
+
+    /**
+     * Runs Face Landmarker on [face] and passes the gaze to [decide]; drops ML Kit false detections where the
+     * landmarker finds no face (see [OnlookerPolicy.isVerified]). Head mode only gets here for faces that
+     * would alert, so the landmarker stays idle while only the owner is in view.
+     */
+    private inline fun verify(upright: Bitmap, face: FaceBox, decide: (Gaze?) -> Boolean): Boolean {
+        val tracker = landmarker() ?: return decide(null)
+        val gaze = runCatching { tracker.gaze(upright, face) }.getOrNull()
+        if (!OnlookerPolicy.isVerified(face, gaze != null)) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "dropped ${face.width}px face at ${face.left},${face.top}: no landmarks")
+            return false
+        }
+        return decide(gaze)
+    }
+
     /** Eye mode: iris gaze for each non-owner face that is turned roughly toward the camera. */
-    private fun eyeOnlookers(upright: Bitmap, faces: List<FaceBox>): List<FaceBox> {
-        val tracker = eyeTracker ?: if (eyeTrackerFailed) null else runCatching { EyeTracker(this) }
-            .onFailure { eyeTrackerFailed = true; Log.e(TAG, "eye tracker unavailable, using head pose", it) }
-            .getOrNull()?.also { eyeTracker = it }
+    private fun eyeOnlookers(upright: Bitmap, faces: List<FaceBox>, ownerFace: FaceBox?): List<FaceBox> {
         val maxHead = prefs.maxHeadAngle
         val maxGaze = prefs.maxGazeAngle
         val limit = OnlookerPolicy.EYE_PREFILTER_ANGLE
-        return OnlookerPolicy.candidates(faces, prefs.ignoreOwner)
+        return OnlookerPolicy.candidates(faces, ownerFace)
             .filter { kotlin.math.abs(it.yaw) <= limit && kotlin.math.abs(it.pitch) <= limit }
             .mapNotNull { face ->
-                val gaze = tracker?.let { t -> runCatching { t.gaze(upright, face) }.getOrNull() }
-                if (BuildConfig.DEBUG && gaze != null) {
-                    Log.d(TAG, "gaze %d,%d: head %.1f/%.1f eyes %.1f/%.1f -> %.1f/%.1f open=%b".format(
-                        face.left, face.top, gaze.headYaw, gaze.headPitch, gaze.eyeYaw, gaze.eyePitch,
-                        gaze.yaw, gaze.pitch, gaze.eyesOpen))
+                var result: FaceBox? = null
+                verify(upright, face) { gaze ->
+                    if (BuildConfig.DEBUG && gaze != null) {
+                        Log.d(TAG, "gaze %d,%d: head %.1f/%.1f eyes %.1f/%.1f -> %.1f/%.1f open=%b".format(
+                            face.left, face.top, gaze.headYaw, gaze.headPitch, gaze.eyeYaw, gaze.eyePitch,
+                            gaze.yaw, gaze.pitch, gaze.eyesOpen))
+                    }
+                    OnlookerPolicy.isLookingEyeMode(face, gaze, maxHead, maxGaze).also { looking ->
+                        if (looking) result = if (gaze != null && face.width >= OnlookerPolicy.MIN_EYE_FACE_PX) {
+                            face.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
+                        } else face
+                    }
                 }
-                if (!OnlookerPolicy.isLookingEyeMode(face, gaze, maxHead, maxGaze)) return@mapNotNull null
-                if (gaze != null && face.width >= OnlookerPolicy.MIN_EYE_FACE_PX) {
-                    face.copy(rays = GazeEstimator.laserRays(gaze, face.width * 0.8f))
-                } else face
+                result
             }
     }
 
@@ -480,7 +504,7 @@ class WatcherService : LifecycleService() {
         override fun onConnected() {
             Log.i(TAG, "server stream connected")
             _serverState.value = ServerState.CONNECTED
-            analysisExecutor.execute { gate.reset() }
+            analysisExecutor.execute { gate.reset(); owner.reset() }
             onMain { updateStatusNotification() }
         }
 

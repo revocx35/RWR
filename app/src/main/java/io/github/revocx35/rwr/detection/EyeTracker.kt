@@ -32,7 +32,7 @@ class EyeTracker(context: Context) : AutoCloseable {
     private val canvas = Canvas(crop)
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
 
-    /** Gaze of the face in [box] of the upright [frame], or null if the landmarker finds no face there. */
+    /** Gaze of the face in [box] of the upright [frame], or null if the landmarker finds no face (or another face) there. */
     fun gaze(frame: Bitmap, box: FaceBox): Gaze? {
         val side = (maxOf(box.right - box.left, box.bottom - box.top) * CROP_MARGIN).toInt()
         if (side < 8) return null
@@ -57,6 +57,8 @@ class EyeTracker(context: Context) : AutoCloseable {
             pts[i * 3 + 1] = y0 + p.y() * side
             pts[i * 3 + 2] = p.z() * side
         }
+        // The crop can contain a neighbouring face; only use landmarks of the face that was detected.
+        if (!OnlookerPolicy.landmarksMatch(box, pts)) return null
         return GazeEstimator.estimate(pts)
     }
 

@@ -17,7 +17,8 @@ ADMIN_PW = "correct horse battery staple"
 
 
 class FakeDetector:
-    """Every frame contains the owner (large) and one onlooker looking at the camera."""
+    """Every frame contains the owner (large; picked by the stream's OwnerTracker) and one onlooker looking at
+    the camera."""
 
     def __init__(self):
         self.calls = 0
@@ -25,7 +26,7 @@ class FakeDetector:
     def analyze(self, img, s):
         self.calls += 1
         return [
-            FaceResult(box=(0, 0, 100, 120), score=0.9, yaw=0, pitch=0, owner=True),
+            FaceResult(box=(0, 0, 100, 120), score=0.9, yaw=0, pitch=0),
             FaceResult(box=(150, 20, 190, 70), score=0.9, yaw=5, pitch=0, looking=True),
         ]
 

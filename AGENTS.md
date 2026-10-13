@@ -73,6 +73,9 @@ Emulator camera gotchas (learned the hard way):
   480×640 frame. Put test faces there. `touch files/dump_frame` (via `run-as`) makes a debug build write the
   next frame to `files/frame.jpg`, so you can see what the camera delivers.
 - Two faces: the owner large, plus a smaller face turned toward the camera → 1 onlooker. One face alone → no alert.
+  The usual scene.jpg also has a half face at the left edge (turned 56°, bigger than the owner). Blurring the
+  onlooker out of it, at source pixels (350..530, 310..540), gives an "owner only" scene that must not alert in
+  either mode. The first watch after an emulator boot often gets no frames, so repeat it.
 - Don't use the Settings app as the "other app" when checking the pop-up. It hides third-party overlays.
 - After `adb install`, SystemUI only re-binds the tile while the QS panel is open, so a bare `click-tile` is a no-op.
   `scripts/emu_start.sh` handles this.
@@ -121,7 +124,12 @@ adb shell am broadcast -n io.github.revocx35.rwr/.DebugInjectReceiver --es path 
 - No analytics, ever. Network use is limited to the user-paired RWR server: TLS only, pinned key, no
   cleartext (`network_security_config.xml`). On-device detection must keep working offline.
 - Gaze math exists twice, in `GazeEstimator.kt` and `server/rwr_server/gaze.py`. Change both together, and
-  keep the synthetic-face tests on both sides identical.
+  keep the synthetic-face tests on both sides identical. The same applies to owner tracking, landmark verification
+  and the alert gate (`OnlookerPolicy.kt` and `server/rwr_server/policy.py`).
+- False alerts: the server keeps event clips (`/data/events`) and logs `onlooker alert (N of M faces)` plus each
+  client settings change (`ignore_owner=False` explains "1 of 1"). To debug, extract frames with the image's
+  ffmpeg (`imageio_ffmpeg.get_ffmpeg_exe()`; headless OpenCV can't read video) and replay them through
+  `Detector.analyze` + `OwnerTracker` + `AlertGate`. Don't commit those frames: they show real people.
 - License is GPL-3.0 (`LICENSE`). New dependencies must be GPLv3-compatible.
 - Test photos of people are **not** committed. Generate or download them into a scratch dir.
 

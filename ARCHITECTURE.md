@@ -39,7 +39,7 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 | `detection/FaceFinder.kt` | ML Kit face detection (fast mode, min face 5%, bundled model): face boxes and head Euler angles. |
 | `detection/EyeTracker.kt` | MediaPipe Face Landmarker (478 points including irises), run on each candidate face: square crop, 1.6× margin, scaled to 256 px, so small faces behind you get enough pixels. Points are mapped back to frame pixels. |
 | `detection/GazeEstimator.kt` | Pure Kotlin, unit-tested; mirrors `server/rwr_server/gaze.py`. Head yaw/pitch from the 3D face plane (cheeks × forehead–chin); eye yaw/pitch from the iris offset inside each eye (`asin(1.25·offset/half-width)`); gaze = head + eyes. Eyes closed if lid gap / width < 0.10. Also builds the laser rays. |
-| `detection/OnlookerPolicy.kt` | Pure Kotlin, unit-tested. Head mode: drop the owner (largest face), keep faces with \|yaw\|,\|pitch\| ≤ angle. Eye mode: prefilter at 60°, then the gaze decides; it falls back to the head rule for faces narrower than 40 px or with no landmarks. `AlertGate`: 2 of the last 3 analysed frames, plus a cooldown. |
+| `detection/OnlookerPolicy.kt` | Pure Kotlin, unit-tested. `OwnerTracker` picks the owner (see "False-alert defences" below). Head mode: keep non-owner faces with \|yaw\|,\|pitch\| ≤ angle. Eye mode: prefilter at 60°, then the gaze decides; it falls back to the head rule for faces narrower than 40 px. `isVerified`/`landmarksMatch`: drop detections ≥ 40 px where Face Landmarker finds no face (or a different one). `AlertGate`: the onlooker at about the same place in 2 of the last 3 analysed frames, plus a cooldown. |
 | `detection/CameraTuning.kt` | Maps the frame-rate setting onto a supported AE FPS range. |
 | `media/FrameRing.kt` | Rolling buffer of `EncodedFrame` (seq, timestamp, JPEG, rotation), bounded by seconds and 48 MB. `ClipTiming` resamples to constant frame rate, the same way as the server's `clips.resample`. |
 | `media/FrameCodec.kt` | YUV_420_888 → NV21 → `YuvImage.compressToJpeg`, which is native and much cheaper than going through a Bitmap. Also decodes a frame back to upright + mirrored. |
@@ -66,8 +66,8 @@ The app works fully on its own. The server is opt-in, paired with a QR code. It 
 | `security.py` | Authentication building blocks: argon2id (64 MiB, t=3, p=4) with a dummy hash for unknown users; 256-bit tokens stored as SHA-256; session create/load with 30 min idle and 12 h absolute timeouts (5 min for the TOTP stage); throttling (per IP: 5 failures / 15 min → 15 min lock; global: 20 failures → 5 min; pairing/token failures: 10 per 10 min); password policy (≥ 12 characters, not trivial). |
 | `web.py` | Admin UI, server-rendered with no JavaScript. Pages: login (+ TOTP step), dashboard, devices and pairing QR, settings, events (media served only to the admin), account (password, TOTP enrol/disable). Every POST checks the session, the CSRF token and Origin/Referer. Login uses a double-submit pre-session token. Session ids rotate on login and after the TOTP step; a password change signs out everywhere. TOTP codes can't be replayed (last step stored). |
 | `api.py` | Device API, authenticated with `Authorization: Bearer`; tokens are never accepted in URLs. Endpoints: `POST /api/v1/pair` (one-time, 10 min code), `GET/DELETE /device`, `GET/PUT /config` and `POST /config/immich-test` (only with `can_configure`), `POST /media` (validates JPEG/MP4 magic bytes, ≤ 80 MB), `WS /stream`. |
-| `stream.py` | One `DeviceStream` per connected phone, with a single connection per device (a new one replaces the old). Frames: header parse, ≤ 4 MB, ≤ 40 fps (excess dropped). Analysis runs in a thread pool, always on the newest frame. Per-device `AlertGate`; alerts are sent as JSON. Builds the photo or the clip (pre frames from `FrameBuffer`, post frames collected live) and hands it to `EventStore`. Client settings are clamped (`ClientSettings.parse`). |
-| `detector.py` | YuNet (OpenCV) finds faces at full resolution, including small ones. Face Landmarker runs on an upscaled square crop of every non-owner face; gaze math is in `gaze.py`. Fallback pose from YuNet's 5 points. `annotate()` draws boxes and laser rays. |
+| `stream.py` | One `DeviceStream` per connected phone, with a single connection per device (a new one replaces the old). Frames: header parse, ≤ 4 MB, ≤ 40 fps (excess dropped). Analysis runs in a thread pool, always on the newest frame. Per-device `OwnerTracker` and `AlertGate` (`policy.py`, same rules as the app); alerts are sent as JSON. Builds the photo or the clip (pre frames from `FrameBuffer`, post frames collected live) and hands it to `EventStore`. Client settings are clamped (`ClientSettings.parse`). |
+| `detector.py` | YuNet (OpenCV) finds faces at full resolution, including small ones. Face Landmarker runs on an upscaled square crop of every face; detections ≥ 40 px without matching landmarks are dropped. Gaze math is in `gaze.py`. Fallback pose from YuNet's 5 points. `annotate()` draws boxes and laser rays. |
 | `clips.py` | `FrameBuffer`; constant-frame-rate resampling; H.264 MP4 via the static ffmpeg from `imageio-ffmpeg` (yuv420p, faststart). |
 | `events.py` | Stores the event row and, if "keep events" is on, the file (0600). Immich upload runs in a 2-thread pool with 3 retries; retention purge runs hourly. |
 | `immich.py` | `POST /api/assets`, then find or create the album and `PUT /api/albums/{id}/assets`. Verified TLS (certifi plus an optional admin CA); `http://` only with an explicit opt-in; no redirects followed; the API key is never logged or returned. |
@@ -93,7 +93,21 @@ Coordinates are in the upright, mirrored frame, which phone and server build ide
 
 ## Key decisions
 
-- **Front camera, owner heuristic, gate, cooldown.** Unchanged from v1.0. The largest face is assumed to be the user.
+- **Front camera, owner heuristic, gate, cooldown.** The owner is the largest face turned toward the camera, tracked across frames (see below).
+- **False-alert defences (v1.1.1).** Real-world false alerts with only the owner in view had three causes, each
+  with a fix that exists on both sides (`OnlookerPolicy.kt` and `server/rwr_server/policy.py`, same constants and
+  same test cases):
+  1. *A bigger face that isn't the owner* (a blurry finger near the lens, a half face cut off at the frame edge)
+     became the "owner" and the real owner was flagged. `OwnerTracker`: initial owner = largest face with
+     \|yaw\| ≤ 35° (pitch is not checked because phones are held low); afterwards the face overlapping the previous
+     owner (IoU ≥ 0.3) stays owner; it's forgotten after 2 s unseen.
+  2. *Phantom faces* (stickers, seat patterns, dark noise). Detections ≥ 40 px are verified with Face Landmarker
+     (phone: only for faces that would alert, so it stays idle with just the owner in view; server: every face).
+  3. *The landmarker reporting a neighbouring face.* It runs on a 1.6× crop around the detection, which can contain
+     another face (the owner's); landmarks are used only if their bounding box overlaps the detection
+     (IoU ≥ 0.3).
+  Plus `AlertGate` now requires the onlooker at about the same place (centres ≤ one face size apart) in 2 of 3
+  frames, so faces that flicker in different places never alert.
 - **Two detection modes.**
   - *Head*: ML Kit Euler angles. Cheapest.
   - *Eye*: iris gaze. It alerts only when the eyes point at the screen, so it also catches someone who turns their head away but keeps their eyes on your screen. It ignores someone facing the camera but looking elsewhere. On the test photos it rejected a face at 22° gaze that head mode accepted.
