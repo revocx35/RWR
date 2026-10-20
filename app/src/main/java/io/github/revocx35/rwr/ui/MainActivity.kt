@@ -63,6 +63,8 @@ import io.github.revocx35.rwr.alert.SnapshotStore
 import io.github.revocx35.rwr.detection.CameraTuning
 import io.github.revocx35.rwr.detection.DetectionMode
 import io.github.revocx35.rwr.detection.WatcherService
+import io.github.revocx35.rwr.server.AuthentikRequiredException
+import io.github.revocx35.rwr.server.RwrAuthentik
 import io.github.revocx35.rwr.server.ServerAccount
 import io.github.revocx35.rwr.server.ServerApi
 import io.github.revocx35.rwr.tile.WatchTileService
@@ -107,7 +109,9 @@ class MainActivity : ComponentActivity() {
     private fun refreshDevicePermission() {
         val a = account ?: return
         lifecycleScope.launch {
-            val info = withContext(Dispatchers.IO) { runCatching { ServerApi.deviceInfo(a) }.getOrNull() } ?: return@launch
+            val result = withContext(Dispatchers.IO) { runCatching { ServerApi.deviceInfo(a) } }
+            if (result.exceptionOrNull() is AuthentikRequiredException) RwrAuthentik.markNeeded()
+            val info = result.getOrNull() ?: return@launch
             val can = info.optBoolean("can_configure")
             if (can != a.canConfigure) {
                 ServerAccount.updateCanConfigure(this@MainActivity, can)
@@ -120,7 +124,10 @@ class MainActivity : ComponentActivity() {
         val a = account ?: return
         lifecycleScope.launch {
             // Best effort: revoke the token on the server too, so it is useless even if copied.
-            withContext(Dispatchers.IO) { runCatching { ServerApi.unpair(a) } }
+            withContext(Dispatchers.IO) {
+                runCatching { ServerApi.unpair(a) }
+                RwrAuthentik.signOut()
+            }
             ServerAccount.clear(this@MainActivity)
             prefs.processOnServer = false
             if (prefs.saveTo.immich) prefs.saveTo = SaveTo.GALLERY
@@ -347,6 +354,13 @@ class MainActivity : ComponentActivity() {
                 return@Section
             }
             Text("Paired with ${a.baseUrl} as “${a.deviceName}”", style = MaterialTheme.typography.bodyMedium)
+            val authentikNeeded by RwrAuthentik.needed.collectAsStateWithLifecycle()
+            if (authentikNeeded) {
+                AuthentikPrompt(this@MainActivity, a.baseUrl, a.pin) {
+                    WatcherService.reloadServer(this@MainActivity)
+                    refreshDevicePermission()
+                }
+            }
             var onServer by remember { mutableStateOf(prefs.processOnServer) }
             Text("Detection runs")
             ChoiceRow(listOf(false, true), onServer, { if (it) "On server" else "On this phone" }) {

@@ -19,7 +19,7 @@ val keystoreProps = Properties().apply {
 val singleAbi: String? = providers.gradleProperty("rwr.abi").orNull
 val abiCodes = mapOf("armeabi-v7a" to 1, "arm64-v8a" to 2, "x86_64" to 3)
 require(singleAbi == null || singleAbi in abiCodes) { "rwr.abi must be one of ${abiCodes.keys}" }
-val baseVersionCode = 8
+val baseVersionCode = 9
 
 android {
     namespace = "io.github.revocx35.rwr"
@@ -31,7 +31,7 @@ android {
         minSdk = 29
         targetSdk = 37
         versionCode = if (singleAbi != null) 10 * baseVersionCode + abiCodes.getValue(singleAbi) else baseVersionCode
-        versionName = "1.5.0"
+        versionName = "1.6.0"
         if (singleAbi != null) ndk { abiFilters += singleAbi }
     }
 
@@ -112,6 +112,7 @@ dependencies {
         exclude(group = "com.google.firebase")
     }
     implementation(libs.okhttp)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.zxing.core)
 
     implementation(platform(libs.compose.bom))
@@ -120,6 +121,7 @@ dependencies {
     implementation(libs.compose.material3)
 
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
 }
 
 // MediaPipe Face Landmarker model (Apache-2.0) for eye tracking. Downloaded once and verified by

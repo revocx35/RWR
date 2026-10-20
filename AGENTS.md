@@ -161,6 +161,13 @@ adb shell am broadcast -n io.github.revocx35.rwr/.DebugInjectReceiver --es path 
 - License is GPL-3.0 (`LICENSE`). New dependencies must be GPLv3-compatible.
 - Test photos of people are **not** committed. Generate or download them into a scratch dir.
 
+## authentik
+
+`server/Authentik.kt` is the same file as in wa_logger's and insta_logger's Android clients and web-ip-phone (only the
+package differs): change them together. Setup and design: `docs/authentik.md`. authentik's introspection accepts the
+app's token for a proxy provider only if the app's OAuth2 provider lists that proxy provider in
+`jwt_federation_providers`. The only new dependency is the kotlinx-serialization JSON runtime (Apache-2.0, no plugin).
+
 ## Releasing
 
 1. Bump `baseVersionCode` and `versionName` in `app/build.gradle.kts` (F-Droid's per-ABI codes derive from it), add

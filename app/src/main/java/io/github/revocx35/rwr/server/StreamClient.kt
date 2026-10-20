@@ -106,6 +106,7 @@ class StreamClient(private val account: ServerAccount, private val listener: Lis
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (t is AuthentikRequiredException) RwrAuthentik.markNeeded()
                 // A refused handshake (bad/revoked token) arrives here as HTTP 403.
                 closed(webSocket, if (response?.code == 403) CODE_REVOKED else 0, t.message ?: t.javaClass.simpleName)
             }

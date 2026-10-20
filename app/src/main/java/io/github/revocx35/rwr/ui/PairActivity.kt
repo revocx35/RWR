@@ -57,6 +57,7 @@ import com.google.zxing.ReaderException
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import io.github.revocx35.rwr.detection.WatcherService
+import io.github.revocx35.rwr.server.AuthentikRequiredException
 import io.github.revocx35.rwr.server.PairingLink
 import io.github.revocx35.rwr.server.ServerAccount
 import io.github.revocx35.rwr.server.ServerApi
@@ -70,6 +71,8 @@ class PairActivity : ComponentActivity() {
     private var found by mutableStateOf<PairingLink?>(null)
     private var busy by mutableStateOf(false)
     private var error by mutableStateOf<String?>(null)
+    /** Pairing hit authentik's sign-in: (link, phone name) to retry after signing in. */
+    private var authentikFor by mutableStateOf<Pair<PairingLink, String>?>(null)
     private var cameraGranted by mutableStateOf(false)
     /** Stops the scanner after a failed attempt, so the same QR code isn't re-read in a loop. */
     private var scanning by mutableStateOf(true)
@@ -127,6 +130,13 @@ class PairActivity : ComponentActivity() {
                 else found = link
             }, enabled = pasted.isNotEmpty() && !busy) { Text("Use link") }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            authentikFor?.let { (link, name) ->
+                AuthentikPrompt(this@PairActivity, link.baseUrl, link.pin) {
+                    authentikFor = null
+                    error = null
+                    pair(link, name)
+                }
+            }
             if (!scanning && cameraGranted) {
                 OutlinedButton(onClick = { error = null; scanning = true }) { Text("Scan again") }
             }
@@ -175,6 +185,7 @@ class PairActivity : ComponentActivity() {
                 Log.w(TAG, "pairing failed", it)
                 scanning = false
                 found = null
+                if (it is AuthentikRequiredException) authentikFor = link to name
                 error = "Pairing failed: ${it.message ?: it.javaClass.simpleName}"
             }
         }

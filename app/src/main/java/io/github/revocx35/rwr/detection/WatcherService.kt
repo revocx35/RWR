@@ -50,6 +50,8 @@ import io.github.revocx35.rwr.media.ClipEncoder
 import io.github.revocx35.rwr.media.EncodedFrame
 import io.github.revocx35.rwr.media.FrameCodec
 import io.github.revocx35.rwr.media.FrameRing
+import io.github.revocx35.rwr.server.AuthentikRequiredException
+import io.github.revocx35.rwr.server.RwrAuthentik
 import io.github.revocx35.rwr.server.ServerAccount
 import io.github.revocx35.rwr.server.ServerApi
 import io.github.revocx35.rwr.server.StreamClient
@@ -466,7 +468,11 @@ class WatcherService : LifecycleService() {
                     note = runCatching {
                         ServerApi.uploadMedia(acct, file, video = true, takenAt = job.alertTs, onlookers = job.onlookers, mode = job.mode)
                         getString(R.string.alert_sent_immich)
-                    }.getOrElse { Log.w(TAG, "clip upload failed", it); "Immich upload failed: ${it.message}" }
+                    }.getOrElse {
+                        if (it is AuthentikRequiredException) RwrAuthentik.markNeeded()
+                        Log.w(TAG, "clip upload failed", it)
+                        "Immich upload failed: ${it.message}"
+                    }
                 }
             } else note = "clip could not be encoded"
             file.delete()
@@ -482,6 +488,7 @@ class WatcherService : LifecycleService() {
             ServerApi.uploadMedia(acct, file, video = false, takenAt = ts, onlookers = onlookers, mode = mode)
             Log.i(TAG, "photo sent to server for Immich")
         } catch (e: Exception) {
+            if (e is AuthentikRequiredException) RwrAuthentik.markNeeded()
             Log.w(TAG, "photo upload failed", e)
         } finally {
             file.delete()

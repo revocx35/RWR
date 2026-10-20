@@ -9,6 +9,7 @@ camerax = "1.6.2"
 litert = "1.4.2"
 mediapipe = "0.10.35"
 okhttp = "5.5.0"
+serialization = "1.11.0"
 zxing = "3.5.4"
 junit = "4.13.2"
 
@@ -24,6 +25,9 @@ litert = { module = "com.google.ai.edge.litert:litert", version.ref = "litert" }
 camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 mediapipe-tasks-vision = { module = "com.google.mediapipe:tasks-vision", version.ref = "mediapipe" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+okhttp-mockwebserver = { module = "com.squareup.okhttp3:mockwebserver3", version.ref = "okhttp" }
+# JSON runtime only (no compiler plugin): used by server/Authentik.kt
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
 compose-ui = { module = "androidx.compose.ui:ui" }

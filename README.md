@@ -111,3 +111,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works and [AGENTS.md](AGENTS.m
 RWR is free software, licensed under the [GNU General Public License v3.0](LICENSE). Bundled models: YuNet face
 detector (OpenCV Zoo, MIT) and MediaPipe Face Landmarker (Apache-2.0); libraries: MediaPipe Tasks and LiteRT (Apache-2.0),
 OkHttp, ZXing, AndroidX (Apache-2.0).
+
+## Server behind authentik
+
+If your RWR server is behind [authentik](https://goauthentik.io) forward auth, the app signs in with authentik
+(once, in the browser) when pairing or when authentik asks again. Setup: [docs/authentik.md](docs/authentik.md).

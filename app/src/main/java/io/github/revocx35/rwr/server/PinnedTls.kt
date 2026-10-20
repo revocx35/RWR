@@ -33,6 +33,11 @@ object PinnedTls {
             // The pin identifies the server; the certificate may not list the IP/name the phone uses.
             b.hostnameVerifier { _, _ -> true }
         }
+        // Server behind authentik forward auth: bearer token + sign-in detection (RwrAuthentik).
+        RwrAuthentik.instance?.let {
+            b.addInterceptor(it.interceptor)
+            b.addNetworkInterceptor(it.networkInterceptor)
+        }
         return b.build()
     }
 

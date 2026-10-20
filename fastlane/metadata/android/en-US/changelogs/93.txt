@@ -1,0 +1,2 @@
+1.6.0: servers behind authentik.
+- If your RWR server sits behind authentik forward auth (e.g. Nginx Proxy Manager + authentik), RWR now signs in with authentik in the browser (OAuth 2 + PKCE) and keeps working in the background. Setup: docs/authentik.md.

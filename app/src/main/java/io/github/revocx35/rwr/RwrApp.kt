@@ -7,6 +7,7 @@ import android.app.NotificationManager
 class RwrApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        io.github.revocx35.rwr.server.RwrAuthentik.init(this)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannels(
             listOf(
